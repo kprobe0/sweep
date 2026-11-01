@@ -103,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.5.0'
+"$SWEEP" --version | grep -q '0.6.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -156,5 +156,19 @@ printf '%s\n' walk yes quit | "$SWEEP" menu >/dev/null
 test ! -e "$SWEEP_HOME/Library/Caches/walk.big" || fail 'yes during a walk left the folder'
 test -f "$SWEEP_HOME/Library/Caches/walk.small/file" || fail 'walk deleted the next folder after quit'
 test -f "$SWEEP_HOME/Documents/keep.txt" || fail 'a document was removed during a walk'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/big.visible" "$SWEEP_HOME/Library/Caches/tiny.hidden"
+mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/keep-phone"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/big.visible/file" bs=1024 count=2048 >/dev/null 2>&1
+printf 'dust' > "$SWEEP_HOME/Library/Caches/tiny.hidden/file"
+printf 'backup' > "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/keep-phone/info"
+hidden="$(printf 'quit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu)"
+printf '%s\n' "$hidden" | grep -q 'big.visible' || fail 'a large folder was hidden'
+printf '%s\n' "$hidden" | grep -q 'tiny.hidden' && fail 'a tiny folder was listed' || true
+printf '%s\n' "$hidden" | grep -q 'smaller folders are hidden' || fail 'the hidden-folder note was missing'
+printf '%s\n' go yes quit | SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/big.visible" || fail 'go left a safe folder'
+test -f "$SWEEP_HOME/Library/Caches/tiny.hidden/file" || fail 'go deleted a hidden folder'
+test -f "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/keep-phone/info" || fail 'go deleted a backup'
 
 printf 'ok\n'

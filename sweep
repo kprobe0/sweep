@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.5.0
+VERSION=0.6.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -24,6 +24,13 @@ else
   SWEEP_HOME="$HOME"
 fi
 LOG_DAYS="${SWEEP_LOG_DAYS:-7}"
+if [[ -n "${SWEEP_MIN_KB+x}" ]]; then
+  MIN_KB="$SWEEP_MIN_KB"
+elif [[ -n "${SWEEP_TEST:-}" ]]; then
+  MIN_KB=0
+else
+  MIN_KB=1024
+fi
 DRY=1
 CMD="scan"
 PICKS=""
@@ -1139,6 +1146,7 @@ PAGE=1
 FILTER=""
 PAGE_SIZE=12
 SHOW_HELP=0
+SHOW_SMALL=0
 
 menu_blank() {
   if [[ -t 1 ]]; then
@@ -1210,12 +1218,12 @@ menu_note() {
 
 menu_draw_home() {
   local kb plain label path how group n shown mark ticked sum care start end total
+  local hidden safe_sum carec markc
   menu_blank
   print_disk
   menu_note
   ensure_catalog
   printf '\n  %sBiggest folders%s\n' "$B" "$Z"
-  printf '  Type a number to tick one. Nothing is deleted until you type yes.\n'
   if [[ -n "$FILTER" ]]; then
     printf '  Showing names that match "%s". Type show for the full list.\n' "$FILTER"
   fi
@@ -1224,10 +1232,19 @@ menu_draw_home() {
   ticked=0
   sum=0
   total=0
+  hidden=0
+  safe_sum=0
   while IFS=$'\t' read -r kb plain label path how group; do
     [[ -n "$path" ]] || continue
     if [[ -n "$FILTER" ]] && ! text_has "$plain $label" "$FILTER"; then
       continue
+    fi
+    if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
+      hidden=$((hidden + 1))
+      continue
+    fi
+    if [[ "$(care_word "$group")" == "safe" ]]; then
+      safe_sum=$((safe_sum + kb))
     fi
     total=$((total + 1))
     n=$((n + 1))
@@ -1237,6 +1254,14 @@ menu_draw_home() {
       sum=$((sum + kb))
     fi
   done <"$MENU_DIR/catalog"
+  if [[ "$safe_sum" -gt 0 ]]; then
+    printf '  Safe folders here: %s. Type go, then yes.\n' "$(human "$safe_sum")"
+  fi
+  if [[ "$SHOW_SMALL" -eq 0 && "$hidden" -gt 0 ]]; then
+    printf '  %s smaller folders are hidden. Type small to see them.\n' "$hidden"
+  elif [[ "$SHOW_SMALL" -eq 1 && "$MIN_KB" -gt 0 ]]; then
+    printf '  Showing smaller folders too. Type small to hide them.\n'
+  fi
   start=$(((PAGE - 1) * PAGE_SIZE + 1))
   end=$((PAGE * PAGE_SIZE))
   if [[ "$total" -eq 0 ]]; then
@@ -1292,6 +1317,7 @@ EOF
   else
     cat <<EOF
 
+  go       remove the safe folders listed here, then type yes
   walk     yes or no, one folder at a time
   clean    delete what you ticked, then type yes
   help     more commands
@@ -1576,6 +1602,9 @@ menu_walk() {
     if [[ "$scope" != "all" && "$(care_word "$group")" != "safe" ]]; then
       continue
     fi
+    if [[ "$kb" -lt "$MIN_KB" ]]; then
+      continue
+    fi
     if [[ "$n" -ge 12 ]]; then
       capped=1
       break
@@ -1672,6 +1701,24 @@ menu_handle_word() {
       menu_walk safe
       return 0
       ;;
+    go)
+      if [[ "$SCREEN" != "home" ]]; then
+        NOTE="Type go from the first list."
+        return 0
+      fi
+      menu_select_safe
+      menu_clean_selected
+      return 0
+      ;;
+    small)
+      if [[ "$SHOW_SMALL" -eq 1 ]]; then
+        SHOW_SMALL=0
+      else
+        SHOW_SMALL=1
+      fi
+      PAGE=1
+      return 0
+      ;;
     all)
       if [[ "$SCREEN" == "home" ]]; then
         menu_select_safe
@@ -1747,7 +1794,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small)
             NOTE="Type $word on its own line."
             ;;
           *)
