@@ -50,7 +50,8 @@ make install
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
-- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The app goes to the Trash only after `--yes`. Leftovers stay unless you pass `--leftovers`.
+- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The preview shows the team id and any package receipt. The app goes to the Trash only after `--yes`. Leftovers stay unless you pass `--leftovers`. A folder left behind by an app is listed by `orphans` only after it has sat unused for 30 days, and it is not selected.
+- `go` and `clean` delete for good. They do not move those folders to the Trash.
 
 ## Commands
 
@@ -60,6 +61,9 @@ sweep items caches
 sweep clean caches --only "Google/AndroidStudio" --yes
 sweep scan
 sweep large
+sweep orphans
+sweep orphans remove com.example.oldapp --yes
+sweep uninstall Name
 ```
 
 `sweep clean --yes` covers caches the system or the tool will rebuild: user caches, Homebrew, npm and the other dev caches, Xcode DerivedData, a few app caches, old logs, Quick Look thumbnails, and the Trash.

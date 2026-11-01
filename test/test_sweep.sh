@@ -108,7 +108,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.11.0'
+"$SWEEP" --version | grep -q '0.12.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -234,6 +234,14 @@ case "$info" in
   *com.example.widget*) ;;
   *) fail 'uninstall did not list the bundle id' ;;
 esac
+case "$info" in
+  *'team none'*) ;;
+  *) fail 'uninstall did not show a team id line' ;;
+esac
+case "$info" in
+  *'Full Disk Access is not required'*) ;;
+  *) fail 'uninstall did not explain the leftovers search' ;;
+esac
 "$SWEEP" uninstall Widget --yes >/dev/null
 test -d "$SWEEP_HOME/.Trash/Widget.app" || fail 'the app was not moved to the Trash'
 test -f "$SWEEP_HOME/Library/Caches/com.example.widget/file" || fail 'a leftover was removed without --leftovers'
@@ -244,6 +252,27 @@ if "$SWEEP" uninstall Widget --yes >/dev/null 2>&1; then
   fail 'a second copy should block uninstall'
 fi
 test -d "$SWEEP_HOME/Applications/Widget.app" || fail 'blocked uninstall removed the app'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/com.example.oldgone" "$SWEEP_HOME/Library/Caches/com.example.newgone"
+printf 'old' > "$SWEEP_HOME/Library/Caches/com.example.oldgone/file"
+printf 'new' > "$SWEEP_HOME/Library/Caches/com.example.newgone/file"
+touch -t 202001010000 "$SWEEP_HOME/Library/Caches/com.example.oldgone" "$SWEEP_HOME/Library/Caches/com.example.oldgone/file"
+orphans="$("$SWEEP" orphans)"
+case "$orphans" in
+  *com.example.oldgone*) ;;
+  *) fail 'an old leftover was hidden' ;;
+esac
+case "$orphans" in
+  *com.example.newgone*) fail 'a new leftover was offered' ;;
+esac
+"$SWEEP" orphans remove com.example.oldgone --yes >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/com.example.oldgone" || fail 'old leftover survived'
+test -f "$SWEEP_HOME/Library/Caches/com.example.newgone/file" || fail 'a new leftover was removed'
+
+mkdir -p "$SWEEP_HOME/Library/Application Support/com.example.oldgone"
+printf 'data' > "$SWEEP_HOME/Library/Application Support/com.example.oldgone/file"
+touch -t 202001010000 "$SWEEP_HOME/Library/Application Support/com.example.oldgone" \
+  "$SWEEP_HOME/Library/Application Support/com.example.oldgone/file"
 
 mkdir -p "$SWEEP_HOME/Library/Caches/com.spotify.client" "$SWEEP_HOME/Library/Caches/closed.app" "$bindir"
 dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/com.spotify.client/file" bs=1024 count=2048 >/dev/null 2>&1
@@ -259,5 +288,13 @@ chmod +x "$bindir/pgrep"
 printf '%s\n' go yes quit | PATH="$bindir:$PATH" SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
 test -d "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'go removed a cache while its app was open'
 test ! -e "$SWEEP_HOME/Library/Caches/closed.app" || fail 'go left a closed app cache'
+test -d "$SWEEP_HOME/Library/Application Support/com.example.oldgone" || fail 'go removed an old leftover'
+kept="$("$SWEEP" orphans)"
+case "$kept" in
+  *'Application Support/com.example.oldgone'*) ;;
+  *) fail 'an old support leftover was hidden after go' ;;
+esac
+"$SWEEP" orphans remove com.example.oldgone --yes >/dev/null
+test ! -e "$SWEEP_HOME/Library/Application Support/com.example.oldgone" || fail 'old support leftover survived'
 
 printf 'ok\n'

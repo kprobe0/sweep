@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.11.0
+VERSION=0.12.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -1144,6 +1144,23 @@ except Exception:
 print(p.get("CFBundleIdentifier") or "")' "$plist"
 }
 
+team_id_of() {
+  local app="$1" line
+  command -v codesign >/dev/null 2>&1 || return 1
+  line="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  [[ -n "$line" && "$line" != "not set" ]] || return 1
+  printf '%s' "$line"
+}
+
+receipts_for() {
+  local id="$1" pkg
+  command -v pkgutil >/dev/null 2>&1 || return 0
+  while IFS= read -r pkg; do
+    [[ "$pkg" == "$id" || "$pkg" == "$id".* ]] || continue
+    printf '%s\n' "$pkg"
+  done < <(pkgutil --pkgs 2>/dev/null || true)
+}
+
 launch_program() {
   python3 -c 'import plistlib,sys
 try:
@@ -1222,8 +1239,18 @@ cmd_uninstall() {
   copies="$(app_copies "$id")"
   printf '  %s\n' "$(basename "$app")"
   printf '  %s\n' "$id"
+  printf '  team %s\n' "$(team_id_of "$app" || printf 'none')"
   printf '  %s\n' "${app#"$SWEEP_HOME"/}"
-  printf '  %s, stays in the Trash until you empty it\n' "$(human "$(kb_of "$app")")"
+  printf '  %s. The app is moved to the Trash, not deleted for good.\n' "$(human "$(kb_of "$app")")"
+  printf '  Leftover search stays inside your home folder. Full Disk Access is not required.\n'
+  printf '  Package receipts, shown only, never used as a delete list:\n'
+  local receipt any_receipt=0
+  while IFS= read -r receipt; do
+    [[ -n "$receipt" ]] || continue
+    any_receipt=1
+    printf '    %s\n' "$receipt"
+  done < <(receipts_for "$id")
+  [[ "$any_receipt" -eq 1 ]] || printf '    none\n'
   if app_is_open "$app"; then
     printf '  This app is open. Quit it before removing it.\n'
   fi
@@ -1263,6 +1290,73 @@ cmd_uninstall() {
   else
     printf '  Leftovers were kept. Pass --leftovers --yes to remove only those exact paths.\n'
   fi
+}
+
+path_age_days() {
+  python3 -c 'import os,sys,time
+print(int((time.time()-os.stat(sys.argv[1]).st_mtime)/86400))' "$1"
+}
+
+bundle_name_ok() {
+  local name="$1" dots
+  [[ "$name" == com.apple.* ]] && return 1
+  dots="$(printf '%s' "$name" | awk -F. '{print NF-1}')"
+  [[ "${dots:-0}" -ge 2 ]]
+}
+
+installed_ids() {
+  local app id
+  while IFS= read -r app; do
+    id="$(bundle_id_of "$app" || true)"
+    [[ -n "$id" ]] && printf '%s\n' "$id"
+  done < <(each_app)
+}
+
+id_is_installed() {
+  local id="$1" ids="$2" line
+  while IFS= read -r line; do
+    [[ "$line" == "$id" ]] && return 0
+  done <<< "$ids"
+  return 1
+}
+
+each_orphan() {
+  local base dir path id ids
+  ids="$(installed_ids)"
+  for base in Caches "Application Support" Containers Logs; do
+    dir="$SWEEP_HOME/Library/$base"
+    [[ -d "$dir" ]] || continue
+    for path in "$dir"/*; do
+      [[ -d "$path" && ! -L "$path" ]] || continue
+      id="$(basename "$path")"
+      bundle_name_ok "$id" || continue
+      if id_is_installed "$id" "$ids"; then
+        continue
+      fi
+      [[ "$(path_age_days "$path")" -ge 30 ]] || continue
+      printf '%s\n' "$path"
+    done
+  done
+}
+
+cmd_orphans() {
+  local action="${1:-}" target="${2:-}" path id found=0
+  printf 'Leftovers whose app is gone, unused for 30 days.\n'
+  printf '  Newer leftovers stay hidden. Nothing is selected.\n'
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    found=1
+    id="$(basename "$path")"
+    printf '  %s    %s\n' "$(human "$(kb_of "$path")")" "${path#"$SWEEP_HOME"/}"
+    if [[ "$action" == "remove" && "$target" == "$id" && "$DRY" -eq 0 ]]; then
+      remember_removal "$(kb_of "$path")" "$id"
+      rm -rf "$path"
+      printf '    Removed. It had been unused for 30 days and no app owns it.\n'
+    elif [[ "$action" == "remove" && "$target" == "$id" ]]; then
+      printf '    Pass --yes to remove it. This is permanent.\n'
+    fi
+  done < <(each_orphan)
+  [[ "$found" -eq 1 ]] || printf '  None.\n'
 }
 
 cmd_login() {
@@ -1639,6 +1733,7 @@ menu_draw_home() {
   safe     delete the usual caches, after you type yes
   info 1   show where line 1 lives
   last     what sweep already removed
+  orphans  leftovers unused for 30 days. Nothing is selected
   quit     leave
 
 EOF
@@ -1855,7 +1950,8 @@ menu_clean_selected() {
     NOTE="Tick a number first."
     return 0
   fi
-  printf '\n  About %s. Type yes to delete, or press return to keep it.\n' "$(human "$sum")"
+  printf '\n  About %s. This is permanent. Nothing here is moved to the Trash.\n' "$(human "$sum")"
+  printf '  Type yes to delete, or press return to keep it.\n'
   if menu_confirm_yes; then
     local before
     before="$(disk_free_kb)"
@@ -1877,7 +1973,7 @@ menu_all_safe() {
   local group
   printf '\n  This clears caches, Homebrew, dev tools, Xcode build data,\n'
   printf '  app caches, old logs, Quick Look, and the Trash.\n'
-  printf '  Backups, browsers, and device files stay.\n'
+  printf '  That removal is permanent. Backups, browsers, and device files stay.\n'
   printf '  Type yes to delete them, or press return to cancel.\n'
   if menu_confirm_yes; then
     local before after gained
@@ -1984,7 +2080,7 @@ menu_walk() {
       printf '  This app is open. Quit it first if you can.\n'
     fi
     printf '\n'
-    printf '  yes    delete it\n'
+    printf '  yes    delete it for good\n'
     printf '  no     keep it and show the next one\n'
     printf '  quit   stop here\n'
     printf '  > '
@@ -2086,6 +2182,11 @@ menu_handle_word() {
       ;;
     uninstall)
       cmd_uninstall
+      menu_pause
+      return 0
+      ;;
+    orphans)
+      cmd_orphans
       menu_pause
       return 0
       ;;
@@ -2238,7 +2339,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last|login|uninstall)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last|login|uninstall|orphans)
             NOTE="Type $word on its own line."
             ;;
           *)
@@ -2262,6 +2363,9 @@ sweep ${VERSION} — a quiet disk cleaner for macOS
                              delete one folder
   sweep clean --yes          delete every safe group
   sweep large                biggest folders, look only
+  sweep orphans              leftovers unused for 30 days. Nothing is selected
+  sweep orphans remove ID --yes
+  sweep uninstall Name       preview one app. It moves to the Trash after --yes
 
 In the menu, type walk to answer yes or no for one folder at a time.
 Or tick lines with a number or a name, then clean, then the word yes.
@@ -2285,7 +2389,7 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    scan|clean|large|help|menu|items|last|login|uninstall)
+    scan|clean|large|help|menu|items|last|login|uninstall|orphans)
       CMD="$1"
       ;;
     projects)
@@ -2325,7 +2429,7 @@ while [[ $# -gt 0 ]]; do
       die "unknown option: $1"
       ;;
     *)
-      if [[ "$CMD" == "login" || "$CMD" == "uninstall" ]]; then
+      if [[ "$CMD" == "login" || "$CMD" == "uninstall" || "$CMD" == "orphans" ]]; then
         EXTRA="${EXTRA:+$EXTRA }$1"
       else
         known_group "$1" || die "unknown group: $1"
@@ -2359,6 +2463,13 @@ case "$CMD" in
     set -- $EXTRA
     set +f
     cmd_uninstall "${1:-}"
+    ;;
+  orphans)
+    set -f
+    # shellcheck disable=SC2086
+    set -- $EXTRA
+    set +f
+    cmd_orphans "${1:-}" "${2:-}"
     ;;
   items) cmd_items ;;
   clean) cmd_clean ;;
