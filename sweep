@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.10.0
+VERSION=0.11.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -1645,7 +1645,7 @@ EOF
   else
     cat <<EOF
 
-  go       remove the safe folders listed here, then type yes
+  go       remove safe folders, except apps that are still open
   walk     yes or no, one folder at a time
   clean    delete what you ticked, then type yes
   help     more commands
@@ -1857,13 +1857,15 @@ menu_clean_selected() {
   fi
   printf '\n  About %s. Type yes to delete, or press return to keep it.\n' "$(human "$sum")"
   if menu_confirm_yes; then
+    local before
+    before="$(disk_free_kb)"
     while IFS=$'\t' read -r n kb plain label path how group; do
       path_selected "$path" || continue
       delete_item "$how" "$path"
     done <"$MENU_DIR/items"
     : >"$MENU_DIR/selpaths"
     forget_catalog
-    NOTE="Removed about $(human "$sum"). $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
+    NOTE="Removed about $(human "$sum"). $(human "$before") free before, $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
     SCREEN="home"
     PAGE=1
   else
@@ -1888,7 +1890,7 @@ menu_all_safe() {
     [[ "$gained" -lt 0 ]] && gained=0
     forget_catalog
     if [[ "$gained" -gt 0 ]]; then
-      NOTE="Removed about $(human "$gained"). $(human "$after") free now.$(snapshot_clause)"
+      NOTE="Removed about $(human "$gained"). $(human "$before") free before, $(human "$after") free now.$(snapshot_clause)"
     else
       NOTE="Deleted. $(human "$after") free now.$(snapshot_clause)"
     fi
@@ -1909,10 +1911,15 @@ menu_select_all() {
 
 menu_select_safe() {
   local n kb plain label path how group
+  OPEN_LEFT=""
   : >"$MENU_DIR/selpaths"
   while IFS=$'\t' read -r n kb plain label path how group; do
     [[ -n "$path" ]] || continue
     [[ "$(care_word "$group")" == "safe" ]] || continue
+    if app_is_open "$path"; then
+      OPEN_LEFT="${OPEN_LEFT:+$OPEN_LEFT, }$plain"
+      continue
+    fi
     printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
   done <"$MENU_DIR/items"
 }
@@ -1944,6 +1951,8 @@ menu_walk() {
   n=0
   capped=0
   total=0
+  local before_free
+  before_free="$(disk_free_kb)"
   while IFS=$'\t' read -r kb plain label path how group <&4; do
     [[ -n "$path" ]] || continue
     if [[ "$scope" != "all" && "$(care_word "$group")" != "safe" ]]; then
@@ -1997,9 +2006,9 @@ menu_walk() {
   if [[ "$n" -eq 0 ]]; then
     NOTE="Nothing safe to walk through."
   elif [[ "$freed" -gt 0 && "$capped" -eq 1 ]]; then
-    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now.$(snapshot_clause) Type walk for the next folders."
+    NOTE="Removed about $(human "$freed"). $(human "$before_free") free before, $(human "$(disk_free_kb)") free now.$(snapshot_clause) Type walk for the next folders."
   elif [[ "$freed" -gt 0 ]]; then
-    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
+    NOTE="Removed about $(human "$freed"). $(human "$before_free") free before, $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
   else
     NOTE="Nothing was deleted."
   fi
@@ -2127,7 +2136,18 @@ menu_handle_word() {
         return 0
       fi
       menu_select_safe
+      if [[ ! -s "$MENU_DIR/selpaths" ]]; then
+        if [[ -n "$OPEN_LEFT" ]]; then
+          NOTE="Left because the app is open: $OPEN_LEFT. Quit it, or tick the line and type clean."
+        else
+          NOTE="Nothing safe to remove."
+        fi
+        return 0
+      fi
       menu_clean_selected
+      if [[ -n "$OPEN_LEFT" ]]; then
+        NOTE="$NOTE Left because the app is open: $OPEN_LEFT."
+      fi
       return 0
       ;;
     small)

@@ -108,7 +108,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.10.0'
+"$SWEEP" --version | grep -q '0.11.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -244,5 +244,20 @@ if "$SWEEP" uninstall Widget --yes >/dev/null 2>&1; then
   fail 'a second copy should block uninstall'
 fi
 test -d "$SWEEP_HOME/Applications/Widget.app" || fail 'blocked uninstall removed the app'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/com.spotify.client" "$SWEEP_HOME/Library/Caches/closed.app" "$bindir"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/com.spotify.client/file" bs=1024 count=2048 >/dev/null 2>&1
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/closed.app/file" bs=1024 count=2048 >/dev/null 2>&1
+cat > "$bindir/pgrep" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-x" && "$2" == "Spotify" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$bindir/pgrep"
+printf '%s\n' go yes quit | PATH="$bindir:$PATH" SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
+test -d "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'go removed a cache while its app was open'
+test ! -e "$SWEEP_HOME/Library/Caches/closed.app" || fail 'go left a closed app cache'
 
 printf 'ok\n'
