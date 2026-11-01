@@ -2,6 +2,8 @@
 
 A quiet disk cleaner for macOS. Open it, type a number, tick the folders you want, then type `yes`. Nothing is deleted before that.
 
+![sweep menu, with Spotify ticked](docs/menu.png)
+
 Paid cleaner apps charge you to empty caches, then sell a subscription on top. sweep is one command, the list of paths is in the source, and it does not free RAM, scan for viruses, or phone home.
 
 ## Install
