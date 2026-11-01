@@ -8,7 +8,7 @@ VERSION=0.4.0
 set -euo pipefail
 shopt -s nullglob
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
+if [[ "$(uname -s)" != "Darwin" && -z "${SWEEP_TEST:-}" ]]; then
   printf 'sweep is for macOS.\n' >&2
   exit 1
 fi
@@ -42,6 +42,25 @@ fi
 die() {
   printf 'sweep: %s\n' "$*" >&2
   exit 1
+}
+
+find_x() {
+  local root="$1"
+  shift
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    find -x "$root" "$@"
+  else
+    find "$root" -xdev "$@"
+  fi
+}
+
+du_depth() {
+  local dir="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    du -xd 1 "$dir"
+  else
+    du -x --max-depth=1 "$dir"
+  fi
 }
 
 status() {
@@ -339,7 +358,7 @@ clean_paths() {
 each_old_log() {
   local logs="$SWEEP_HOME/Library/Logs"
   [[ -d "$logs" && ! -L "$logs" ]] || return 0
-  find -x "$logs" \
+  find_x "$logs" \
     \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
     -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true
 }
@@ -423,7 +442,7 @@ docker_kb() {
 
 project_rows() {
   local root="$SWEEP_HOME"
-  find -x "$root" \
+  find_x "$root" \
     \( -type d \( -name Library -o -name .Trash -o -name .git \) \) -prune -o \
     \( -type d -name node_modules \) -prune -print -o \
     \( -type d -name target \) -prune -print -o \
@@ -729,7 +748,14 @@ cmd_large() {
     while IFS=$'\t' read -r kb path; do
       [[ -n "$path" ]] || continue
       printf '  %10s    %s\n' "$(human "$kb")" "${path#"$SWEEP_HOME"/}"
-    done < <(du -xd 1 "$dir" 2>/dev/null | awk -F '\t' -v root="$dir" '$2 != root { print $1 "\t" $2 }' | sort -nr | awk 'NR <= 8')
+    done < <(du_depth "$dir" 2>/dev/null | awk -v root="$dir" '
+      {
+        size = $1
+        path = $0
+        sub(/^[0-9]+[[:space:]]+/, "", path)
+        if (path != root && size ~ /^[0-9]+$/) print size "\t" path
+      }
+    ' | sort -nr | awk 'NR <= 8')
     clear_status
   done
   printf '\n'
@@ -836,7 +862,7 @@ kb_old_logs_under() {
   while IFS= read -r -d '' file; do
     k="$(du -sk "$file" 2>/dev/null | awk '{print $1}')" || k=0
     sum=$((sum + ${k:-0}))
-  done < <(find -x "$dir" \
+  done < <(find_x "$dir" \
     \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
     -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true)
   printf '%s' "$sum"
@@ -849,7 +875,7 @@ clean_old_logs_under() {
   while IFS= read -r -d '' file; do
     under "$logs" "$file" || continue
     rm -f "$file"
-  done < <(find -x "$dir" \
+  done < <(find_x "$dir" \
     \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
     -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true)
 }
