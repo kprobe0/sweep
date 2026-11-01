@@ -103,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.7.0'
+"$SWEEP" --version | grep -q '0.8.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -173,5 +173,18 @@ test -f "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/keep-phone/in
 mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
 printf 'x' > "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/info"
 "$SWEEP" items backups | grep -q 'Device backup AAAAAAAA' || fail 'a backup was shown as a raw id'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/com.spotify.client" "$bindir"
+printf 'song' > "$SWEEP_HOME/Library/Caches/com.spotify.client/file"
+cat > "$bindir/pgrep" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-x" && "$2" == "Spotify" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$bindir/pgrep"
+open_note="$(printf 'quit\n' | PATH="$bindir:$PATH" SWEEP_TEST=1 SWEEP_HOME="$SWEEP_HOME" "$SWEEP" menu)"
+printf '%s\n' "$open_note" | grep -q 'app open' || fail 'an open app was not marked'
 
 printf 'ok\n'

@@ -30,7 +30,7 @@ make install
 
 ## The menu
 
-`sweep` opens on the biggest folders, largest first, with plain names (Spotify, not a bundle id). A line marked `ask first` is a backup, a browser cache, or device files. `safe` means the app will rebuild it.
+`sweep` opens on the biggest folders, largest first, with plain names (Spotify, not a bundle id). A line marked `ask first` is a backup, a browser cache, or device files. `safe` means the app will rebuild it. `app open` means that app is still running, so quit it first if you can.
 
 - Type `1` or `1 3` to tick lines. Type `Spotify` to tick that line.
 - Type `more` for the next page, and `find music` to show only matching names.

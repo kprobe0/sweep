@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.7.0
+VERSION=0.8.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -1217,6 +1217,29 @@ care_word() {
   esac
 }
 
+owner_process() {
+  case "$1" in
+    *com.spotify.client*|*"/Spotify/"*) printf 'Spotify' ;;
+    *Google/Chrome*) printf 'Google Chrome' ;;
+    *com.apple.Safari*) printf 'Safari' ;;
+    *Firefox*) printf 'firefox' ;;
+    *Slack*) printf 'Slack' ;;
+    *discord*|*Discord*) printf 'Discord' ;;
+    *"/Code/"*) printf 'Code' ;;
+    *Cursor*) printf 'Cursor' ;;
+    *DerivedData*|*com.apple.dt.Xcode*) printf 'Xcode' ;;
+    *Figma*) printf 'Figma' ;;
+    *) return 1 ;;
+  esac
+}
+
+app_is_open() {
+  local proc
+  command -v pgrep >/dev/null 2>&1 || return 1
+  proc="$(owner_process "$1")" || return 1
+  pgrep -x "$proc" >/dev/null 2>&1
+}
+
 menu_note() {
   if [[ -n "$NOTE" ]]; then
     printf '\n  %s\n' "$NOTE"
@@ -1285,7 +1308,10 @@ menu_draw_home() {
         mark="[ ]"
       fi
       care="$(care_word "$group")"
-      if [[ "$care" == "ask first" ]]; then
+      if app_is_open "$path"; then
+        care="app open"
+      fi
+      if [[ "$care" == "ask first" || "$care" == "app open" ]]; then
         carec="$Y"
       else
         carec="$G"
@@ -1521,7 +1547,11 @@ menu_clean_selected() {
     ticked=$((ticked + 1))
     sum=$((sum + kb))
     if [[ "$ticked" -le 8 ]]; then
-      printf '    %10s    %s\n' "$(human "$kb")" "$plain"
+      if app_is_open "$path"; then
+        printf '    %10s    %s  (app is open)\n' "$(human "$kb")" "$plain"
+      else
+        printf '    %10s    %s\n' "$(human "$kb")" "$plain"
+      fi
     fi
   done <"$MENU_DIR/items"
   if [[ "$ticked" -gt 8 ]]; then
@@ -1614,11 +1644,20 @@ why_item() {
 }
 
 menu_walk() {
-  local scope="$1" kb plain label path how group answer freed n capped
+  local scope="$1" kb plain label path how group answer freed n capped total
   ensure_catalog
   freed=0
   n=0
   capped=0
+  total=0
+  while IFS=$'\t' read -r kb plain label path how group <&4; do
+    [[ -n "$path" ]] || continue
+    if [[ "$scope" != "all" && "$(care_word "$group")" != "safe" ]]; then
+      continue
+    fi
+    [[ "$kb" -lt "$MIN_KB" ]] && continue
+    total=$((total + 1))
+  done 4<"$MENU_DIR/catalog"
   while IFS=$'\t' read -r kb plain label path how group <&4; do
     [[ -n "$path" ]] || continue
     if [[ "$scope" != "all" && "$(care_word "$group")" != "safe" ]]; then
@@ -1635,8 +1674,13 @@ menu_walk() {
     menu_blank
     print_disk
     printf '\n  %s%s%s\n' "$B" "$plain" "$Z"
+    printf '  %s of %s\n' "$n" "$total"
     printf '  %s\n' "$(human "$kb")"
-    printf '  %s\n\n' "$(why_item "$group")"
+    printf '  %s\n' "$(why_item "$group")"
+    if app_is_open "$path"; then
+      printf '  This app is open. Quit it first if you can.\n'
+    fi
+    printf '\n'
     printf '  yes    delete it\n'
     printf '  no     keep it and show the next one\n'
     printf '  quit   stop here\n'
