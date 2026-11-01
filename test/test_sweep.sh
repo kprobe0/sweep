@@ -103,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.6.0'
+"$SWEEP" --version | grep -q '0.7.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -170,5 +170,8 @@ printf '%s\n' go yes quit | SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
 test ! -e "$SWEEP_HOME/Library/Caches/big.visible" || fail 'go left a safe folder'
 test -f "$SWEEP_HOME/Library/Caches/tiny.hidden/file" || fail 'go deleted a hidden folder'
 test -f "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/keep-phone/info" || fail 'go deleted a backup'
+mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+printf 'x' > "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/info"
+"$SWEEP" items backups | grep -q 'Device backup AAAAAAAA' || fail 'a backup was shown as a raw id'
 
 printf 'ok\n'

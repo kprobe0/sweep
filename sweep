@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.6.0
+VERSION=0.7.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -615,6 +615,10 @@ disk_line() {
   df -k "$SWEEP_HOME" | awk 'NR==2 { print $4, $3, $2 }'
 }
 
+disk_free_kb() {
+  df -k "$SWEEP_HOME" | awk 'NR==2 { print $4 }'
+}
+
 print_disk() {
   local free used total
   read -r free used total < <(disk_line)
@@ -799,6 +803,10 @@ pretty_label() {
   base="$(basename "$path")"
   parent="$(basename "$(dirname "$path")")"
   case "$path" in
+    */MobileSync/Backup/*)
+      printf 'Device backup %s' "$(printf '%s' "$base" | cut -c1-8)"
+      return
+      ;;
     */.npm) printf 'npm downloads'; return ;;
     */.cache/pip|*/Library/Caches/pip) printf 'pip downloads'; return ;;
     */.cache/uv) printf 'uv downloads'; return ;;
@@ -1510,10 +1518,15 @@ menu_clean_selected() {
   ticked=0
   while IFS=$'\t' read -r n kb plain label path how group; do
     path_selected "$path" || continue
-    printf '    %10s    %s\n' "$(human "$kb")" "$plain"
-    sum=$((sum + kb))
     ticked=$((ticked + 1))
+    sum=$((sum + kb))
+    if [[ "$ticked" -le 8 ]]; then
+      printf '    %10s    %s\n' "$(human "$kb")" "$plain"
+    fi
   done <"$MENU_DIR/items"
+  if [[ "$ticked" -gt 8 ]]; then
+    printf '    and %s more\n' "$((ticked - 8))"
+  fi
   if [[ "$ticked" -eq 0 ]]; then
     NOTE="Tick a number first."
     return 0
@@ -1526,7 +1539,7 @@ menu_clean_selected() {
     done <"$MENU_DIR/items"
     : >"$MENU_DIR/selpaths"
     forget_catalog
-    NOTE="Deleted."
+    NOTE="Removed about $(human "$sum"). $(human "$(disk_free_kb)") free now."
     SCREEN="home"
     PAGE=1
   else
@@ -1541,11 +1554,20 @@ menu_all_safe() {
   printf '  Backups, browsers, and device files stay.\n'
   printf '  Type yes to delete them, or press return to cancel.\n'
   if menu_confirm_yes; then
+    local before after gained
+    before="$(disk_free_kb)"
     for group in $DEFAULT_GROUPS; do
       clean_group "$group"
     done
+    after="$(disk_free_kb)"
+    gained=$((after - before))
+    [[ "$gained" -lt 0 ]] && gained=0
     forget_catalog
-    NOTE="Deleted."
+    if [[ "$gained" -gt 0 ]]; then
+      NOTE="Removed about $(human "$gained"). $(human "$after") free now."
+    else
+      NOTE="Deleted. $(human "$after") free now."
+    fi
     PAGE=1
   else
     NOTE="Kept. Nothing was deleted."
@@ -1637,9 +1659,9 @@ menu_walk() {
   if [[ "$n" -eq 0 ]]; then
     NOTE="Nothing safe to walk through."
   elif [[ "$freed" -gt 0 && "$capped" -eq 1 ]]; then
-    NOTE="Freed about $(human "$freed"). Type walk for the next folders."
+    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now. Type walk for the next folders."
   elif [[ "$freed" -gt 0 ]]; then
-    NOTE="Freed about $(human "$freed")."
+    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now."
   else
     NOTE="Nothing was deleted."
   fi
