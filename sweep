@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.9.0
+VERSION=0.10.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -32,6 +32,8 @@ else
   MIN_KB=1024
 fi
 DRY=1
+UNINSTALL_LEFTOVERS=0
+EXTRA=""
 CMD="scan"
 PICKS=""
 ONLY=""
@@ -529,6 +531,15 @@ measure() {
     docker) docker_kb ;;
     backups) kb_of "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" ;;
     projects) projects_kb ;;
+    downloads)
+      local f sum
+      sum=0
+      while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        sum=$((sum + $(kb_of "$f")))
+      done < <(each_download)
+      printf '%s' "$sum"
+      ;;
     *) die "unknown group: $group" ;;
   esac
 }
@@ -599,12 +610,19 @@ clean_group() {
       wipe_named "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" "MobileSync/Backup"
       ;;
     projects) clean_projects ;;
+    downloads)
+      local f
+      while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        remove_one "$(dirname "$f")" "$f"
+      done < <(each_download)
+      ;;
     *) die "unknown group: $group" ;;
   esac
 }
 
 DEFAULT_GROUPS="caches homebrew dev xcode apps quicklook logs trash"
-OPTIONAL_GROUPS="browsers archives devices simulators docker backups projects"
+OPTIONAL_GROUPS="browsers archives devices simulators docker backups projects downloads"
 
 known_group() {
   case " $DEFAULT_GROUPS $OPTIONAL_GROUPS " in
@@ -618,15 +636,51 @@ disk_line() {
 }
 
 disk_free_kb() {
+  local bytes
+  if command -v diskutil >/dev/null 2>&1; then
+    bytes="$(diskutil info "$SWEEP_HOME" 2>/dev/null | sed -n 's/.*Container Free Space:.*(\([0-9][0-9]*\) Bytes.*/\1/p' | head -n 1)"
+    if [[ -n "$bytes" ]]; then
+      printf '%s' "$((bytes / 1024))"
+      return 0
+    fi
+  fi
   df -k "$SWEEP_HOME" | awk 'NR==2 { print $4 }'
 }
 
+snapshot_clause() {
+  if real_machine && command -v tmutil >/dev/null 2>&1; then
+    if tmutil listlocalsnapshots / 2>/dev/null | grep -q 'com.apple.TimeMachine'; then
+      printf ' Local snapshots may still hold those bytes until macOS purges them.'
+    fi
+  fi
+}
+
 print_disk() {
-  local free used total
+  local free used total container
   read -r free used total < <(disk_line)
+  container="$(disk_free_kb)"
   printf '%s%s%s\n' "$B" "sweep" "$Z"
-  printf '  %s free    %s used\n' "$(human "$free")" "$(human "$used")"
+  if command -v diskutil >/dev/null 2>&1 && [[ "$container" != "$free" ]]; then
+    printf '  %s container free    %s volume free\n' "$(human "$container")" "$(human "$free")"
+  else
+    printf '  %s free    %s used\n' "$(human "$free")" "$(human "$used")"
+  fi
   printf '  %s%s%s\n' "$D" "$(df -h "$SWEEP_HOME" | awk 'NR==2 { print $1 }')" "$Z"
+}
+
+fate_word() {
+  case "$1" in
+    trash|backups|archives|downloads) printf 'stays' ;;
+    *) printf 'rebuilds' ;;
+  esac
+}
+
+each_download() {
+  local f
+  for f in "$SWEEP_HOME/Downloads"/*.dmg "$SWEEP_HOME/Downloads"/*.pkg "$SWEEP_HOME/Downloads"/*.mpkg; do
+    [[ -f "$f" || -L "$f" ]] || continue
+    printf '%s\n' "$f"
+  done
 }
 
 row() {
@@ -807,6 +861,10 @@ pretty_label() {
   case "$path" in
     */MobileSync/Backup/*)
       printf 'Device backup %s' "$(printf '%s' "$base" | cut -c1-8)"
+      return
+      ;;
+    */Downloads/*)
+      printf '%s' "$base"
       return
       ;;
     */.npm) printf 'npm downloads'; return ;;
@@ -1012,6 +1070,14 @@ list_items() {
         emit_item "$kb" "${path#"$SWEEP_HOME"/}" "$path" path
       done < <(project_rows)
       ;;
+    downloads)
+      while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        kb="$(kb_of "$path")"
+        [[ "${kb:-0}" -gt 0 ]] || continue
+        emit_item "$kb" "$(basename "$path")" "$path" path
+      done < <(each_download)
+      ;;
     *) die "unknown group: $group" ;;
   esac
 }
@@ -1057,6 +1123,188 @@ remember_removal() {
   file="$(receipt_file)"
   mkdir -p "$(dirname "$file")"
   printf '%s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(human "$kb")" "$name" >>"$file"
+}
+
+app_search_roots() {
+  if [[ -n "${SWEEP_TEST:-}" ]]; then
+    printf '%s\n' "$SWEEP_HOME/Applications"
+  else
+    printf '%s\n' /Applications "$HOME/Applications"
+  fi
+}
+
+bundle_id_of() {
+  local plist="$1/Contents/Info.plist"
+  [[ -f "$plist" ]] || return 1
+  python3 -c 'import plistlib,sys
+try:
+    p=plistlib.load(open(sys.argv[1],"rb"))
+except Exception:
+    sys.exit(1)
+print(p.get("CFBundleIdentifier") or "")' "$plist"
+}
+
+launch_program() {
+  python3 -c 'import plistlib,sys
+try:
+    p=plistlib.load(open(sys.argv[1],"rb"))
+except Exception:
+    sys.exit(0)
+prog=p.get("Program") or ""
+if not prog:
+    args=p.get("ProgramArguments") or []
+    if args:
+        prog=args[0]
+print(prog)' "$1" 2>/dev/null || true
+}
+
+each_app() {
+  local root app
+  while IFS= read -r root; do
+    [[ -d "$root" ]] || continue
+    for app in "$root"/*.app; do
+      [[ -d "$app" ]] || continue
+      printf '%s\n' "$app"
+    done
+  done < <(app_search_roots)
+}
+
+app_copies() {
+  local want="$1" app id n
+  n=0
+  while IFS= read -r app; do
+    id="$(bundle_id_of "$app" || true)"
+    [[ "$id" == "$want" ]] || continue
+    n=$((n + 1))
+  done < <(each_app)
+  printf '%s' "$n"
+}
+
+leftover_paths() {
+  local id="$1" p
+  for p in \
+    "$SWEEP_HOME/Library/Caches/$id" \
+    "$SWEEP_HOME/Library/Preferences/$id.plist" \
+    "$SWEEP_HOME/Library/Application Support/$id" \
+    "$SWEEP_HOME/Library/Logs/$id" \
+    "$SWEEP_HOME/Library/Saved Application State/$id.savedState" \
+    "$SWEEP_HOME/Library/Containers/$id"
+  do
+    [[ -e "$p" || -L "$p" ]] || continue
+    case "$(basename "$p")" in
+      "$id"|"$id.plist"|"$id.savedState") printf '%s\n' "$p" ;;
+    esac
+  done
+}
+
+cmd_uninstall() {
+  local name="$1" app id copies p
+  if [[ -z "$name" ]]; then
+    printf 'Installed apps. Nothing is moved until you pass --yes.\n'
+    while IFS= read -r app; do
+      id="$(bundle_id_of "$app" || true)"
+      printf '  %s\n    %s\n    %s\n' "$(basename "$app" .app)" "${id:-no bundle id}" "$(human "$(kb_of "$app")")"
+    done < <(each_app)
+    printf '\n  sweep uninstall Name --yes    moves that app to the Trash\n'
+    printf '  Leftovers are listed and kept unless you also pass --leftovers.\n'
+    return 0
+  fi
+  app=""
+  while IFS= read -r p; do
+    if [[ "$(basename "$p" .app)" == "$name" ]]; then
+      app="$p"
+      break
+    fi
+  done < <(each_app)
+  [[ -n "$app" ]] || die "No app named $name in the application folders."
+  id="$(bundle_id_of "$app" || true)"
+  [[ -n "$id" ]] || die "$name has no bundle id. Sweep will not guess leftovers."
+  copies="$(app_copies "$id")"
+  printf '  %s\n' "$(basename "$app")"
+  printf '  %s\n' "$id"
+  printf '  %s\n' "${app#"$SWEEP_HOME"/}"
+  printf '  %s, stays in the Trash until you empty it\n' "$(human "$(kb_of "$app")")"
+  if app_is_open "$app"; then
+    printf '  This app is open. Quit it before removing it.\n'
+  fi
+  printf '  Leftovers with this exact bundle id:\n'
+  local any=0
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    any=1
+    printf '    %s    %s\n' "$(human "$(kb_of "$p")")" "${p#"$SWEEP_HOME"/}"
+  done < <(leftover_paths "$id")
+  [[ "$any" -eq 1 ]] || printf '    none\n'
+  if [[ "$DRY" -eq 1 ]]; then
+    printf '  Nothing was moved. Pass --yes to move the app to the Trash.\n'
+    return 0
+  fi
+  if app_is_open "$app"; then
+    die "$name is open. Quit it, then run this again."
+  fi
+  if [[ "${copies:-0}" -gt 1 ]]; then
+    die "Another copy of $id is installed. Sweep will not remove one of them."
+  fi
+  mkdir -p "$SWEEP_HOME/.Trash"
+  local dest="$SWEEP_HOME/.Trash/$(basename "$app")"
+  if [[ -e "$dest" ]]; then
+    dest="$SWEEP_HOME/.Trash/$(basename "$app" .app)-$(date '+%H%M%S').app"
+  fi
+  remember_removal "$(kb_of "$app")" "$(basename "$app" .app)"
+  mv "$app" "$dest"
+  printf '  Moved to the Trash.\n'
+  if [[ "$UNINSTALL_LEFTOVERS" -eq 1 ]]; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      remember_removal "$(kb_of "$p")" "$(basename "$p")"
+      rm -rf "$p"
+      printf '  Removed %s\n' "${p#"$SWEEP_HOME"/}"
+    done < <(leftover_paths "$id")
+  else
+    printf '  Leftovers were kept. Pass --leftovers --yes to remove only those exact paths.\n'
+  fi
+}
+
+cmd_login() {
+  local plist prog base action target
+  action="${1:-}"
+  target="${2:-}"
+  printf 'Login items\n'
+  printf '  A helper that still exists is left alone.\n'
+  printf '  Everything Apple protects is in System Settings → General → Login Items & Extensions.\n'
+  if [[ ! -d "$SWEEP_HOME/Library/LaunchAgents" ]]; then
+    printf '  No user login helpers.\n'
+    return 0
+  fi
+  local found=0
+  for plist in "$SWEEP_HOME/Library/LaunchAgents"/*.plist; do
+    [[ -f "$plist" ]] || continue
+    prog="$(launch_program "$plist")"
+    [[ -n "$prog" ]] || continue
+    base="$(basename "$plist")"
+    if [[ -e "$prog" ]]; then
+      continue
+    fi
+    found=1
+    printf '  %s\n    missing %s\n' "$base" "$prog"
+    if [[ "$action" == "remove" && "$target" == "$base" ]]; then
+      if [[ "$DRY" -eq 1 ]]; then
+        printf '    Pass --yes to remove this helper. The missing program is not restored.\n'
+      else
+        remember_removal "$(kb_of "$plist")" "$base"
+        rm -f "$plist"
+        printf '    Removed. It pointed at a program that was already gone.\n'
+      fi
+    fi
+  done
+  [[ "$found" -eq 1 ]] || printf '  No user login helpers with a missing program.\n'
+  if [[ "$action" == "remove" && "$found" -eq 1 && "$DRY" -eq 1 ]]; then
+    :
+  elif [[ "$action" == "remove" && "$DRY" -eq 0 ]]; then
+    local removed=0
+    [[ -f "$SWEEP_HOME/Library/LaunchAgents/$target" ]] && removed=1
+    [[ "$removed" -eq 0 ]] || die "Left $target in place. It is not a missing-program helper."
+  fi
 }
 
 cmd_last() {
@@ -1348,8 +1596,14 @@ menu_draw_home() {
       care="$(care_word "$group")"
       if app_is_open "$path"; then
         care="app open"
+      elif [[ "$care" == "ask first" && "$(fate_word "$group")" == "stays" ]]; then
+        care="stays"
+      elif [[ "$care" != "ask first" ]]; then
+        care="$(fate_word "$group")"
       fi
       if [[ "$care" == "ask first" || "$care" == "app open" ]]; then
+        carec="$Y"
+      elif [[ "$care" == "stays" && "$(care_word "$group")" == "ask first" ]]; then
         carec="$Y"
       else
         carec="$G"
@@ -1609,7 +1863,7 @@ menu_clean_selected() {
     done <"$MENU_DIR/items"
     : >"$MENU_DIR/selpaths"
     forget_catalog
-    NOTE="Removed about $(human "$sum"). $(human "$(disk_free_kb)") free now."
+    NOTE="Removed about $(human "$sum"). $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
     SCREEN="home"
     PAGE=1
   else
@@ -1634,9 +1888,9 @@ menu_all_safe() {
     [[ "$gained" -lt 0 ]] && gained=0
     forget_catalog
     if [[ "$gained" -gt 0 ]]; then
-      NOTE="Removed about $(human "$gained"). $(human "$after") free now."
+      NOTE="Removed about $(human "$gained"). $(human "$after") free now.$(snapshot_clause)"
     else
-      NOTE="Deleted. $(human "$after") free now."
+      NOTE="Deleted. $(human "$after") free now.$(snapshot_clause)"
     fi
     PAGE=1
   else
@@ -1743,9 +1997,9 @@ menu_walk() {
   if [[ "$n" -eq 0 ]]; then
     NOTE="Nothing safe to walk through."
   elif [[ "$freed" -gt 0 && "$capped" -eq 1 ]]; then
-    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now. Type walk for the next folders."
+    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now.$(snapshot_clause) Type walk for the next folders."
   elif [[ "$freed" -gt 0 ]]; then
-    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now."
+    NOTE="Removed about $(human "$freed"). $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
   else
     NOTE="Nothing was deleted."
   fi
@@ -1814,6 +2068,16 @@ menu_handle_word() {
       ;;
     last)
       menu_show_last
+      return 0
+      ;;
+    login)
+      cmd_login
+      menu_pause
+      return 0
+      ;;
+    uninstall)
+      cmd_uninstall
+      menu_pause
       return 0
       ;;
     large)
@@ -1954,7 +2218,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last|login|uninstall)
             NOTE="Type $word on its own line."
             ;;
           *)
@@ -2001,7 +2265,7 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    scan|clean|large|help|menu|items|last)
+    scan|clean|large|help|menu|items|last|login|uninstall)
       CMD="$1"
       ;;
     projects)
@@ -2019,6 +2283,9 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || die "--only needs the folder name"
       ONLY="${ONLY}"$'\n'"$1"
+      ;;
+    --leftovers)
+      UNINSTALL_LEFTOVERS=1
       ;;
     --dry-run)
       DRY=1
@@ -2038,8 +2305,12 @@ while [[ $# -gt 0 ]]; do
       die "unknown option: $1"
       ;;
     *)
-      known_group "$1" || die "unknown group: $1"
-      PICKS="${PICKS:+$PICKS }$1"
+      if [[ "$CMD" == "login" || "$CMD" == "uninstall" ]]; then
+        EXTRA="${EXTRA:+$EXTRA }$1"
+      else
+        known_group "$1" || die "unknown group: $1"
+        PICKS="${PICKS:+$PICKS }$1"
+      fi
       ;;
   esac
   shift
@@ -2055,6 +2326,20 @@ case "$CMD" in
     ;;
   menu) cmd_menu ;;
   last) cmd_last ;;
+  login)
+    set -f
+    # shellcheck disable=SC2086
+    set -- $EXTRA
+    set +f
+    cmd_login "${1:-}" "${2:-}"
+    ;;
+  uninstall)
+    set -f
+    # shellcheck disable=SC2086
+    set -- $EXTRA
+    set +f
+    cmd_uninstall "${1:-}"
+    ;;
   items) cmd_items ;;
   clean) cmd_clean ;;
   projects) cmd_projects ;;

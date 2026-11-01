@@ -108,7 +108,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.9.0'
+"$SWEEP" --version | grep -q '0.10.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -191,5 +191,58 @@ EOF
 chmod +x "$bindir/pgrep"
 open_note="$(printf 'quit\n' | PATH="$bindir:$PATH" SWEEP_TEST=1 SWEEP_HOME="$SWEEP_HOME" "$SWEEP" menu)"
 printf '%s\n' "$open_note" | grep -q 'app open' || fail 'an open app was not marked'
+
+mkdir -p "$SWEEP_HOME/Downloads" "$SWEEP_HOME/Library/LaunchAgents" "$SWEEP_HOME/Applications/Widget.app/Contents"
+printf 'pkg' > "$SWEEP_HOME/Downloads/Setup.pkg"
+printf 'keep' > "$SWEEP_HOME/Downloads/notes.txt"
+"$SWEEP" items downloads | grep -q 'Setup.pkg' || fail 'installer was not listed'
+"$SWEEP" clean --yes downloads >/dev/null
+test ! -e "$SWEEP_HOME/Downloads/Setup.pkg" || fail 'installer survived'
+test -f "$SWEEP_HOME/Downloads/notes.txt" || fail 'a download that is not an installer was removed'
+
+cat > "$SWEEP_HOME/Library/LaunchAgents/com.example.missing.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.missing</string>
+  <key>Program</key><string>/no/such/sweep-helper</string>
+</dict></plist>
+EOF
+cat > "$SWEEP_HOME/Library/LaunchAgents/com.example.live.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.live</string>
+  <key>Program</key><string>/bin/echo</string>
+</dict></plist>
+EOF
+"$SWEEP" login | grep -q 'com.example.missing.plist' || fail 'missing login helper was not listed'
+"$SWEEP" login | grep -q 'com.example.live.plist' && fail 'a live login helper was listed' || true
+"$SWEEP" login remove com.example.missing.plist --yes >/dev/null
+test ! -e "$SWEEP_HOME/Library/LaunchAgents/com.example.missing.plist" || fail 'missing login helper survived'
+test -f "$SWEEP_HOME/Library/LaunchAgents/com.example.live.plist" || fail 'a live login helper was removed'
+
+cat > "$SWEEP_HOME/Applications/Widget.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.widget</string>
+  <key>CFBundleName</key><string>Widget</string>
+</dict></plist>
+EOF
+mkdir -p "$SWEEP_HOME/Library/Caches/com.example.widget"
+printf 'left' > "$SWEEP_HOME/Library/Caches/com.example.widget/file"
+info="$("$SWEEP" uninstall Widget)"
+case "$info" in
+  *com.example.widget*) ;;
+  *) fail 'uninstall did not list the bundle id' ;;
+esac
+"$SWEEP" uninstall Widget --yes >/dev/null
+test -d "$SWEEP_HOME/.Trash/Widget.app" || fail 'the app was not moved to the Trash'
+test -f "$SWEEP_HOME/Library/Caches/com.example.widget/file" || fail 'a leftover was removed without --leftovers'
+mkdir -p "$SWEEP_HOME/Applications/Widget.app/Contents" "$SWEEP_HOME/Applications/WidgetCopy.app/Contents"
+cp "$SWEEP_HOME/.Trash/Widget.app/Contents/Info.plist" "$SWEEP_HOME/Applications/Widget.app/Contents/Info.plist"
+cp "$SWEEP_HOME/Applications/Widget.app/Contents/Info.plist" "$SWEEP_HOME/Applications/WidgetCopy.app/Contents/Info.plist"
+if "$SWEEP" uninstall Widget --yes >/dev/null 2>&1; then
+  fail 'a second copy should block uninstall'
+fi
+test -d "$SWEEP_HOME/Applications/Widget.app" || fail 'blocked uninstall removed the app'
 
 printf 'ok\n'

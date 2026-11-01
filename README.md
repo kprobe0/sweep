@@ -8,7 +8,14 @@ Paid cleaner apps charge you to empty caches, then sell a subscription on top. s
 
 ## Install
 
-Open Terminal, paste this, and press Return:
+From Terminal:
+
+```bash
+brew tap kprobe0/sweep https://github.com/kprobe0/sweep
+brew install --HEAD kprobe0/sweep/sweep
+```
+
+Or paste this and press Return:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kprobe0/sweep/main/install.sh | bash
@@ -30,7 +37,7 @@ make install
 
 ## The menu
 
-`sweep` opens on the biggest folders, largest first, with plain names (Spotify, not a bundle id). A line marked `ask first` is a backup, a browser cache, or device files. `safe` means the app will rebuild it. `app open` means that app is still running, so quit it first if you can.
+`sweep` opens on the biggest folders, largest first, with plain names (Spotify, not a bundle id). `rebuilds` means the app or tool creates it again. `stays` means the space stays gone, which is why backups and old installers are not part of `go`. `ask first` and `app open` mean look before you delete.
 
 - Type `1` or `1 3` to tick lines. Type `Spotify` to tick that line.
 - Type `more` for the next page, and `find music` to show only matching names.
@@ -43,6 +50,7 @@ make install
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
+- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The app goes to the Trash only after `--yes`. Leftovers stay unless you pass `--leftovers`.
 
 ## Commands
 
