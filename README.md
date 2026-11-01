@@ -52,7 +52,9 @@ make install
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
-- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The preview shows the team id and any package receipt. The app goes to the Trash only after `--yes`. Leftovers stay unless you pass `--leftovers`. A folder left behind by an app is listed by `orphans` only after it has sat unused for 30 days, and it is not selected.
+- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The preview shows the team id, any package receipt, and shared folders such as a group container. Shared folders are shown and never deleted. The app goes to the Trash only after `--yes`. Exact leftovers stay unless you pass `--leftovers`.
+- A folder left behind by an app appears on the first list after it has sat unused for 30 days. It is marked `stays` and it is not ticked. `go` leaves it. `orphans` lists the same folders.
+- `sweep last` records the date, the size, the name, and the path.
 - `go` and `clean` delete for good. They do not move those folders to the Trash.
 
 ## Commands

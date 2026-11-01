@@ -62,6 +62,10 @@ case "$last" in
   *Spotify*) ;;
   *) fail 'last did not remember Spotify' ;;
 esac
+case "$last" in
+  *Library/Caches/com.spotify.client*) ;;
+  *) fail 'last did not record the folder path' ;;
+esac
 test -d "$SWEEP_HOME/Library/Caches/zz.big" || fail '--only Spotify removed another folder'
 printf '%s\n' "$items" | grep -q 'CloudKit' && fail 'CloudKit was offered for deletion' || true
 printf '%s\n' "$items" | grep -q 'com.apple.Safari' && fail 'browser cache was listed under caches' || true
@@ -108,7 +112,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.12.0'
+"$SWEEP" --version | grep -q '0.13.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -228,7 +232,11 @@ cat > "$SWEEP_HOME/Applications/Widget.app/Contents/Info.plist" <<'EOF'
 </dict></plist>
 EOF
 mkdir -p "$SWEEP_HOME/Library/Caches/com.example.widget"
+mkdir -p "$SWEEP_HOME/Library/Group Containers/ABCD.com.example.widget"
+mkdir -p "$SWEEP_HOME/Library/Application Support/Example"
 printf 'left' > "$SWEEP_HOME/Library/Caches/com.example.widget/file"
+printf 'group' > "$SWEEP_HOME/Library/Group Containers/ABCD.com.example.widget/file"
+printf 'vendor' > "$SWEEP_HOME/Library/Application Support/Example/file"
 info="$("$SWEEP" uninstall Widget)"
 case "$info" in
   *com.example.widget*) ;;
@@ -242,6 +250,14 @@ case "$info" in
   *'Full Disk Access is not required'*) ;;
   *) fail 'uninstall did not explain the leftovers search' ;;
 esac
+case "$info" in
+  *'never a delete list'*ABCD.com.example.widget*) ;;
+  *) fail 'uninstall hid a group container' ;;
+esac
+case "$info" in
+  *'Application Support/Example'*) ;;
+  *) fail 'uninstall hid a shared vendor folder' ;;
+esac
 "$SWEEP" uninstall Widget --yes >/dev/null
 test -d "$SWEEP_HOME/.Trash/Widget.app" || fail 'the app was not moved to the Trash'
 test -f "$SWEEP_HOME/Library/Caches/com.example.widget/file" || fail 'a leftover was removed without --leftovers'
@@ -252,6 +268,11 @@ if "$SWEEP" uninstall Widget --yes >/dev/null 2>&1; then
   fail 'a second copy should block uninstall'
 fi
 test -d "$SWEEP_HOME/Applications/Widget.app" || fail 'blocked uninstall removed the app'
+rm -rf "$SWEEP_HOME/Applications/WidgetCopy.app"
+"$SWEEP" uninstall Widget --leftovers --yes >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/com.example.widget" || fail 'an exact leftover survived --leftovers'
+test -d "$SWEEP_HOME/Library/Group Containers/ABCD.com.example.widget" || fail 'a group container was deleted'
+test -d "$SWEEP_HOME/Library/Application Support/Example" || fail 'a shared vendor folder was deleted'
 
 mkdir -p "$SWEEP_HOME/Library/Caches/com.example.oldgone" "$SWEEP_HOME/Library/Caches/com.example.newgone"
 printf 'old' > "$SWEEP_HOME/Library/Caches/com.example.oldgone/file"
@@ -270,9 +291,14 @@ test ! -e "$SWEEP_HOME/Library/Caches/com.example.oldgone" || fail 'old leftover
 test -f "$SWEEP_HOME/Library/Caches/com.example.newgone/file" || fail 'a new leftover was removed'
 
 mkdir -p "$SWEEP_HOME/Library/Application Support/com.example.oldgone"
-printf 'data' > "$SWEEP_HOME/Library/Application Support/com.example.oldgone/file"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Application Support/com.example.oldgone/file" bs=1024 count=2048 >/dev/null 2>&1
 touch -t 202001010000 "$SWEEP_HOME/Library/Application Support/com.example.oldgone" \
   "$SWEEP_HOME/Library/Application Support/com.example.oldgone/file"
+shown="$(printf 'quit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$shown" in
+  *Oldgone*stays*) ;;
+  *) fail 'an old leftover was missing from the first list' ;;
+esac
 
 mkdir -p "$SWEEP_HOME/Library/Caches/com.spotify.client" "$SWEEP_HOME/Library/Caches/closed.app" "$bindir"
 dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/com.spotify.client/file" bs=1024 count=2048 >/dev/null 2>&1

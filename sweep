@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.12.0
+VERSION=0.13.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -167,6 +167,7 @@ empty_dir() {
   [[ "$(physical "$dir")" == "$(physical "$SWEEP_HOME")" ]] && die "refusing to empty the home folder"
   for child in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     [[ -e "$child" || -L "$child" ]] || continue
+    remember_path "$child"
     remove_one "$dir" "$child"
   done
 }
@@ -179,6 +180,7 @@ wipe_named() {
   [[ "$real" == *"/$suffix" ]] || die "refusing to touch $dir"
   for child in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     [[ -e "$child" || -L "$child" ]] || continue
+    remember_path "$child"
     if [[ -L "$child" ]]; then
       rm "$child"
       continue
@@ -241,6 +243,7 @@ clean_caches() {
         case "$(basename "$sub")" in
           Chrome|"Chrome Canary"|Chromium) continue ;;
         esac
+        remember_path "$sub"
         remove_one "$child" "$sub"
       done
       continue
@@ -248,6 +251,7 @@ clean_caches() {
     if skip_cache_name "$base"; then
       continue
     fi
+    remember_path "$child"
     remove_one "$root" "$child"
   done
 }
@@ -359,11 +363,13 @@ clean_paths() {
           continue
           ;;
       esac
+      remember_path "$path"
       [[ -L "$path" ]] && { rm "$path"; continue; }
       under "$SWEEP_HOME" "$path" || continue
       rm -rf "$path"
       continue
     fi
+    remember_path "$path"
     remove_one "$parent" "$path"
   done
 }
@@ -392,6 +398,7 @@ clean_logs() {
   under "$SWEEP_HOME" "$logs" || die "refusing to touch $logs"
   while IFS= read -r -d '' file; do
     under "$logs" "$file" || continue
+    remember_path "$file"
     rm -f "$file"
   done < <(each_old_log)
 }
@@ -505,6 +512,7 @@ clean_projects() {
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     project_ok "$path" || continue
+    remember_path "$path"
     remove_one "$(dirname "$path")" "$path"
   done < <(project_rows)
 }
@@ -565,9 +573,7 @@ hint_of() {
 }
 
 clean_group() {
-  local group="$1" kb
-  kb="$(measure "$group")"
-  remember_removal "$kb" "$group"
+  local group="$1"
   case "$group" in
     caches) clean_caches ;;
     homebrew)
@@ -603,6 +609,7 @@ clean_group() {
       xcrun simctl delete unavailable >/dev/null 2>&1 || true
       ;;
     docker)
+      remember_removal "$(docker_kb)" "Docker unused data"
       docker_up || return 0
       docker system prune -f >/dev/null 2>&1 || true
       ;;
@@ -614,6 +621,7 @@ clean_group() {
       local f
       while IFS= read -r f; do
         [[ -n "$f" ]] || continue
+        remember_path "$f"
         remove_one "$(dirname "$f")" "$f"
       done < <(each_download)
       ;;
@@ -670,7 +678,7 @@ print_disk() {
 
 fate_word() {
   case "$1" in
-    trash|backups|archives|downloads) printf 'stays' ;;
+    trash|backups|archives|downloads|orphans) printf 'stays' ;;
     *) printf 'rebuilds' ;;
   esac
 }
@@ -1117,12 +1125,23 @@ receipt_file() {
 }
 
 remember_removal() {
-  local kb="$1" name="$2" file
+  local kb="$1" name="$2" path="${3:-}" file rel
   [[ "${kb:-0}" -gt 0 ]] || return 0
   [[ -n "$name" ]] || return 0
   file="$(receipt_file)"
   mkdir -p "$(dirname "$file")"
-  printf '%s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(human "$kb")" "$name" >>"$file"
+  if [[ -n "$path" ]]; then
+    rel="${path#"$SWEEP_HOME"/}"
+    printf '%s  %s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(human "$kb")" "$name" "$rel" >>"$file"
+  else
+    printf '%s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(human "$kb")" "$name" >>"$file"
+  fi
+}
+
+remember_path() {
+  local path="$1"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  remember_removal "$(kb_of "$path")" "$(pretty_label "$(basename "$path")" "$path")" "$path"
 }
 
 app_search_roots() {
@@ -1214,6 +1233,35 @@ leftover_paths() {
   done
 }
 
+shared_paths() {
+  local id="$1" vendor dir path base low
+  vendor="$(printf '%s' "$id" | awk -F. 'length($2) >= 4 { print tolower($2) }')"
+  for dir in \
+    "$SWEEP_HOME/Library/Group Containers" \
+    "$SWEEP_HOME/Library/Application Support" \
+    "$SWEEP_HOME/Library/Containers" \
+    "$SWEEP_HOME/Library/Caches" \
+    "$SWEEP_HOME/Library/Logs"
+  do
+    [[ -d "$dir" && ! -L "$dir" ]] || continue
+    for path in "$dir"/*; do
+      [[ -e "$path" && ! -L "$path" ]] || continue
+      base="$(basename "$path")"
+      [[ "$base" == "$id" || "$base" == "$id.plist" || "$base" == "$id.savedState" ]] && continue
+      case "$base" in
+        "$id".*|"group.$id"|"group.$id".*|*.$id|*.$id.*)
+          printf '%s\n' "$path"
+          continue
+          ;;
+      esac
+      if [[ -n "$vendor" ]]; then
+        low="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+        [[ "$low" == "$vendor" ]] && printf '%s\n' "$path"
+      fi
+    done
+  done
+}
+
 cmd_uninstall() {
   local name="$1" app id copies p
   if [[ -z "$name" ]]; then
@@ -1262,6 +1310,14 @@ cmd_uninstall() {
     printf '    %s    %s\n' "$(human "$(kb_of "$p")")" "${p#"$SWEEP_HOME"/}"
   done < <(leftover_paths "$id")
   [[ "$any" -eq 1 ]] || printf '    none\n'
+  printf '  Shared folders, shown only, never a delete list:\n'
+  local shared any_shared=0
+  while IFS= read -r shared; do
+    [[ -n "$shared" ]] || continue
+    any_shared=1
+    printf '    %s    %s\n' "$(human "$(kb_of "$shared")")" "${shared#"$SWEEP_HOME"/}"
+  done < <(shared_paths "$id")
+  [[ "$any_shared" -eq 1 ]] || printf '    none\n'
   if [[ "$DRY" -eq 1 ]]; then
     printf '  Nothing was moved. Pass --yes to move the app to the Trash.\n'
     return 0
@@ -1277,13 +1333,13 @@ cmd_uninstall() {
   if [[ -e "$dest" ]]; then
     dest="$SWEEP_HOME/.Trash/$(basename "$app" .app)-$(date '+%H%M%S').app"
   fi
-  remember_removal "$(kb_of "$app")" "$(basename "$app" .app)"
+  remember_removal "$(kb_of "$app")" "$(basename "$app" .app)" "$app"
   mv "$app" "$dest"
   printf '  Moved to the Trash.\n'
   if [[ "$UNINSTALL_LEFTOVERS" -eq 1 ]]; then
     while IFS= read -r p; do
       [[ -n "$p" ]] || continue
-      remember_removal "$(kb_of "$p")" "$(basename "$p")"
+      remember_removal "$(kb_of "$p")" "$(basename "$p")" "$p"
       rm -rf "$p"
       printf '  Removed %s\n' "${p#"$SWEEP_HOME"/}"
     done < <(leftover_paths "$id")
@@ -1339,6 +1395,16 @@ each_orphan() {
   done
 }
 
+orphan_still() {
+  local want="$1" path
+  under "$SWEEP_HOME" "$want" || return 1
+  [[ -d "$want" && ! -L "$want" ]] || return 1
+  while IFS= read -r path; do
+    [[ "$path" == "$want" ]] && return 0
+  done < <(each_orphan)
+  return 1
+}
+
 cmd_orphans() {
   local action="${1:-}" target="${2:-}" path id found=0
   printf 'Leftovers whose app is gone, unused for 30 days.\n'
@@ -1349,7 +1415,7 @@ cmd_orphans() {
     id="$(basename "$path")"
     printf '  %s    %s\n' "$(human "$(kb_of "$path")")" "${path#"$SWEEP_HOME"/}"
     if [[ "$action" == "remove" && "$target" == "$id" && "$DRY" -eq 0 ]]; then
-      remember_removal "$(kb_of "$path")" "$id"
+      remember_removal "$(kb_of "$path")" "$id" "$path"
       rm -rf "$path"
       printf '    Removed. It had been unused for 30 days and no app owns it.\n'
     elif [[ "$action" == "remove" && "$target" == "$id" ]]; then
@@ -1385,7 +1451,7 @@ cmd_login() {
       if [[ "$DRY" -eq 1 ]]; then
         printf '    Pass --yes to remove this helper. The missing program is not restored.\n'
       else
-        remember_removal "$(kb_of "$plist")" "$base"
+        remember_removal "$(kb_of "$plist")" "$base" "$plist"
         rm -f "$plist"
         printf '    Removed. It pointed at a program that was already gone.\n'
       fi
@@ -1416,18 +1482,23 @@ cmd_last() {
 delete_item() {
   local how="$1" path="$2" c kb name
   case "$how" in
-    simulators) ;;
+    simulators|orphan) ;;
     docker) remember_removal "$(docker_kb)" "Docker unused data" ;;
     *)
       if [[ -e "$path" || -L "$path" ]]; then
         kb="$(kb_of "$path")"
         name="$(pretty_label "$(basename "$path")" "$path")"
-        remember_removal "$kb" "$name"
+        remember_removal "$kb" "$name" "$path"
       fi
       ;;
   esac
   case "$how" in
     path) remove_one "$(dirname "$path")" "$path" ;;
+    orphan)
+      orphan_still "$path" || die "refusing to touch $path"
+      remember_removal "$(kb_of "$path")" "$(pretty_label "$(basename "$path")" "$path")" "$path"
+      rm -rf "$path"
+      ;;
     app) delete_app_cache "$path" ;;
     logs) clean_old_logs_under "$path" ;;
     trash) remove_one "$SWEEP_HOME/.Trash" "$path" ;;
@@ -1585,12 +1656,32 @@ ensure_catalog() {
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$kb" "$plain" "$label" "$path" "$how" "$group" >>"$MENU_DIR/catalog.tmp"
     done < <(sorted_items "$group")
   done
+  status "Measuring leftovers"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    catalog_has_path "$path" && continue
+    kb="$(kb_of "$path")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    plain="$(pretty_label "$(basename "$path")" "$path")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$kb" "$plain" "$(basename "$path")" "$path" orphan orphans >>"$MENU_DIR/catalog.tmp"
+  done < <(each_orphan)
   clear_status
   sort -nr "$MENU_DIR/catalog.tmp" >"$MENU_DIR/catalog"
   rm -f "$MENU_DIR/catalog.tmp"
 }
 
+catalog_has_path() {
+  local want="$1" kb plain label path how group
+  [[ -s "$MENU_DIR/catalog.tmp" ]] || return 1
+  while IFS=$'\t' read -r kb plain label path how group; do
+    [[ "$path" == "$want" ]] && return 0
+  done <"$MENU_DIR/catalog.tmp"
+  return 1
+}
+
 care_word() {
+  [[ "$1" == "orphans" ]] && { printf 'ask first'; return; }
   case " $OPTIONAL_GROUPS " in
     *" $1 "*) printf 'ask first' ;;
     *) printf 'safe' ;;
@@ -2036,6 +2127,7 @@ why_item() {
     archives) printf 'An old Xcode export. This exact file will not come back.' ;;
     projects) printf 'Build files. The next build creates them again.' ;;
     docker) printf 'Docker data no container is using.' ;;
+    orphans) printf 'Left by an app that is gone. It has been unused for 30 days.' ;;
     *) printf 'Sweep can remove this.' ;;
   esac
 }
@@ -2116,7 +2208,7 @@ menu_pause() {
 }
 
 menu_info() {
-  local word="$1" n kb plain label path how group found base
+  local word="$1" n kb plain label path how group found base word_care
   found=0
   [[ -f "$MENU_DIR/items" ]] || {
     NOTE="Open the list first."
@@ -2127,7 +2219,11 @@ menu_info() {
     if [[ "$word" == "$n" || "$(fold_case "$word")" == "$(fold_case "$plain")" || "$word" == "$label" || "$word" == "$base" ]]; then
       found=1
       printf '\n  %s%s%s\n' "$B" "$plain" "$Z"
-      printf '  %s, %s\n' "$(human "$kb")" "$(care_word "$group")"
+      word_care="$(care_word "$group")"
+      if [[ "$word_care" == "ask first" && "$(fate_word "$group")" == "stays" ]]; then
+        word_care="stays"
+      fi
+      printf '  %s, %s\n' "$(human "$kb")" "$word_care"
       printf '  %s\n' "$(why_item "$group")"
       if [[ "$path" != "-" ]]; then
         printf '  %s\n' "${path#"$SWEEP_HOME"/}"
