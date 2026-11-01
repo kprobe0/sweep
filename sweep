@@ -1,0 +1,1417 @@
+#!/bin/bash
+# sweep — a quiet disk cleaner for macOS.
+# Deletes regenerable caches. Leaves your files alone unless you name them.
+# Nothing is removed unless you pass --yes.
+
+VERSION=0.2.0
+
+set -euo pipefail
+shopt -s nullglob
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf 'sweep is for macOS.\n' >&2
+  exit 1
+fi
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf 'Run sweep as your user, not root.\n' >&2
+  exit 1
+fi
+
+if [[ -n "${SWEEP_TEST:-}" ]]; then
+  SWEEP_HOME="${SWEEP_HOME:-$HOME}"
+else
+  SWEEP_HOME="$HOME"
+fi
+LOG_DAYS="${SWEEP_LOG_DAYS:-7}"
+DRY=1
+CMD="scan"
+PICKS=""
+ONLY=""
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  B=$'\033[1m'
+  D=$'\033[2m'
+  Z=$'\033[0m'
+else
+  B=""
+  D=""
+  Z=""
+fi
+
+die() {
+  printf 'sweep: %s\n' "$*" >&2
+  exit 1
+}
+
+status() {
+  if [[ -t 2 ]]; then
+    printf '\r\033[2m  %-48s\033[0m' "$1" >&2
+  fi
+}
+
+clear_status() {
+  if [[ -t 2 ]]; then
+    printf '\r\033[K' >&2
+  fi
+}
+
+physical() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+under() {
+  local parent child
+  parent="$(physical "$1")"
+  child="$(physical "$2")"
+  [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
+}
+
+kb_of() {
+  local path="$1" k
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    printf '0'
+    return
+  fi
+  k="$(du -sk "$path" 2>/dev/null | awk '{print $1}')" || k=""
+  printf '%s' "${k:-0}"
+}
+
+human() {
+  awk -v k="${1:-0}" 'BEGIN {
+    if (k+0 < 0) k = 0
+    split("KB MB GB TB PB", u, " ")
+    if (k < 10) { printf "%d KB", k; exit }
+    v = k
+    i = 1
+    while (v >= 1024 && i < 5) { v /= 1024; i++ }
+    printf "%.1f %s", v, u[i]
+  }'
+}
+
+protected() {
+  local path home
+  path="$(physical "$1")"
+  home="$(physical "$SWEEP_HOME")"
+  case "$path" in
+    "$home/Documents"|"$home/Documents/"*| \
+    "$home/Desktop"|"$home/Desktop/"*| \
+    "$home/Pictures"|"$home/Pictures/"*| \
+    "$home/Movies"|"$home/Movies/"*| \
+    "$home/Music"|"$home/Music/"*| \
+    "$home/.ssh"|"$home/.ssh/"*| \
+    "$home/Library/Mail"|"$home/Library/Mail/"*| \
+    "$home/Library/Messages"|"$home/Library/Messages/"*| \
+    "$home/Library/Preferences"|"$home/Library/Preferences/"*| \
+    "$home/Library/Application Support"|"$home/Library/Application Support/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+remove_one() {
+  local parent="$1" path="$2"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if [[ -L "$path" ]]; then
+    rm "$path"
+    return 0
+  fi
+  if ! under "$parent" "$path"; then
+    printf 'skipped %s\n' "$path" >&2
+    return 0
+  fi
+  if protected "$path"; then
+    printf 'skipped %s\n' "$path" >&2
+    return 0
+  fi
+  rm -rf "$path"
+}
+
+empty_dir() {
+  local dir="$1" child
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  under "$SWEEP_HOME" "$dir" || die "refusing to touch $dir"
+  [[ "$(physical "$dir")" == "$(physical "$SWEEP_HOME")" ]] && die "refusing to empty the home folder"
+  for child in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    remove_one "$dir" "$child"
+  done
+}
+
+wipe_named() {
+  local dir="$1" suffix="$2" child real
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  under "$SWEEP_HOME" "$dir" || die "refusing to touch $dir"
+  real="$(physical "$dir")"
+  [[ "$real" == *"/$suffix" ]] || die "refusing to touch $dir"
+  for child in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    if [[ -L "$child" ]]; then
+      rm "$child"
+      continue
+    fi
+    under "$dir" "$child" || continue
+    rm -rf "$child"
+  done
+}
+
+skip_cache_name() {
+  case "$1" in
+    CloudKit|com.apple.HomeKit|FamilyCircle|Homebrew| \
+    com.apple.Safari|Firefox|BraveSoftware|company.thebrowser.Browser| \
+    com.microsoft.edgemac|com.operasoftware.Opera|com.operasoftware.OperaGX| \
+    com.apple.QuickLook.thumbnailcache|com.apple.QuickLook.ThumbnailsAgent| \
+    com.apple.dt.Xcode|org.swift.swiftpm|pip|go-build|CocoaPods|Yarn|pnpm| \
+    com.apple.akd|com.apple.accountsd|com.apple.identityservicesd)
+      return 0
+      ;;
+  esac
+  case "$1" in
+    com.apple.Safari.*|*CloudKit*|*HomeKit*|*FamilyCircle*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+sum_caches() {
+  local root="$SWEEP_HOME/Library/Caches" child base sum sub
+  sum=0
+  [[ -d "$root" && ! -L "$root" ]] || { printf '0'; return; }
+  for child in "$root"/*; do
+    base="$(basename "$child")"
+    if [[ "$base" == "Google" && -d "$child" && ! -L "$child" ]]; then
+      for sub in "$child"/*; do
+        case "$(basename "$sub")" in
+          Chrome|"Chrome Canary"|Chromium) continue ;;
+        esac
+        sum=$((sum + $(kb_of "$sub")))
+      done
+      continue
+    fi
+    if skip_cache_name "$base"; then
+      continue
+    fi
+    sum=$((sum + $(kb_of "$child")))
+  done
+  printf '%s' "$sum"
+}
+
+clean_caches() {
+  local root="$SWEEP_HOME/Library/Caches" child base sub
+  [[ -d "$root" && ! -L "$root" ]] || return 0
+  under "$SWEEP_HOME" "$root" || die "refusing to touch $root"
+  for child in "$root"/*; do
+    base="$(basename "$child")"
+    if [[ "$base" == "Google" && -d "$child" && ! -L "$child" ]]; then
+      for sub in "$child"/*; do
+        case "$(basename "$sub")" in
+          Chrome|"Chrome Canary"|Chromium) continue ;;
+        esac
+        remove_one "$child" "$sub"
+      done
+      continue
+    fi
+    if skip_cache_name "$base"; then
+      continue
+    fi
+    remove_one "$root" "$child"
+  done
+}
+
+brew_cache_dir() {
+  local cache home_real cache_real
+  command -v brew >/dev/null 2>&1 || return 1
+  cache="$(brew --cache 2>/dev/null || true)"
+  [[ -n "$cache" ]] || return 1
+  home_real="$(physical "$SWEEP_HOME")"
+  cache_real="$(physical "$cache")"
+  [[ "$cache_real" == "$home_real"/* ]] || return 1
+  printf '%s' "$cache"
+}
+
+browser_paths() {
+  local h="$SWEEP_HOME"
+  printf '%s\n' \
+    "$h/Library/Caches/com.apple.Safari" \
+    "$h/Library/Caches/Google/Chrome" \
+    "$h/Library/Caches/Google/Chrome Canary" \
+    "$h/Library/Caches/Google/Chromium" \
+    "$h/Library/Caches/Firefox" \
+    "$h/Library/Caches/BraveSoftware" \
+    "$h/Library/Caches/company.thebrowser.Browser" \
+    "$h/Library/Caches/com.microsoft.edgemac" \
+    "$h/Library/Caches/com.operasoftware.Opera" \
+    "$h/Library/Caches/com.operasoftware.OperaGX"
+}
+
+dev_paths() {
+  local h="$SWEEP_HOME"
+  printf '%s\n' \
+    "$h/.npm" \
+    "$h/.cache/pip" \
+    "$h/Library/Caches/pip" \
+    "$h/.cache/uv" \
+    "$h/.yarn/cache" \
+    "$h/Library/Caches/Yarn" \
+    "$h/Library/Caches/pnpm" \
+    "$h/.cargo/registry/cache" \
+    "$h/.cargo/registry/src" \
+    "$h/.cargo/git/checkouts" \
+    "$h/Library/Caches/go-build" \
+    "$h/.cache/go-build" \
+    "$h/.gradle/caches" \
+    "$h/Library/Caches/CocoaPods" \
+    "$h/Library/Caches/org.carthage.CarthageKit" \
+    "$h/Library/Caches/zig" \
+    "$h/.cache/swift-package-manager"
+}
+
+xcode_paths() {
+  local h="$SWEEP_HOME"
+  printf '%s\n' \
+    "$h/Library/Developer/Xcode/DerivedData" \
+    "$h/Library/Developer/CoreSimulator/Caches" \
+    "$h/Library/Caches/com.apple.dt.Xcode" \
+    "$h/Library/Caches/org.swift.swiftpm"
+}
+
+device_paths() {
+  local h="$SWEEP_HOME/Library/Developer/Xcode"
+  printf '%s\n' \
+    "$h/iOS DeviceSupport" \
+    "$h/watchOS DeviceSupport" \
+    "$h/tvOS DeviceSupport" \
+    "$h/visionOS DeviceSupport"
+}
+
+app_paths() {
+  local h="$SWEEP_HOME/Library/Application Support" app leaf
+  for app in Code "Code - Insiders" Cursor Slack discord Discord "Microsoft Teams" Figma; do
+    for leaf in Cache CachedData "Code Cache" GPUCache; do
+      printf '%s\n' "$h/$app/$leaf"
+    done
+  done
+}
+
+quicklook_paths() {
+  local h="$SWEEP_HOME/Library/Caches"
+  printf '%s\n' \
+    "$h/com.apple.QuickLook.thumbnailcache" \
+    "$h/com.apple.QuickLook.ThumbnailsAgent"
+}
+
+sum_paths() {
+  local path sum
+  sum=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    sum=$((sum + $(kb_of "$path")))
+  done
+  printf '%s' "$sum"
+}
+
+clean_paths() {
+  local path parent
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    [[ -e "$path" || -L "$path" ]] || continue
+    parent="$(dirname "$path")"
+    if protected "$path"; then
+      case "$(basename "$path")" in
+        Cache|CachedData|GPUCache) ;;
+        "Code Cache") ;;
+        *)
+          printf 'skipped %s\n' "$path" >&2
+          continue
+          ;;
+      esac
+      [[ -L "$path" ]] && { rm "$path"; continue; }
+      under "$SWEEP_HOME" "$path" || continue
+      rm -rf "$path"
+      continue
+    fi
+    remove_one "$parent" "$path"
+  done
+}
+
+each_old_log() {
+  local logs="$SWEEP_HOME/Library/Logs"
+  [[ -d "$logs" && ! -L "$logs" ]] || return 0
+  find -x "$logs" \
+    \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
+    -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true
+}
+
+logs_kb() {
+  local file sum k
+  sum=0
+  while IFS= read -r -d '' file; do
+    k="$(du -sk "$file" 2>/dev/null | awk '{print $1}')" || k=0
+    sum=$((sum + ${k:-0}))
+  done < <(each_old_log)
+  printf '%s' "$sum"
+}
+
+clean_logs() {
+  local logs="$SWEEP_HOME/Library/Logs" file
+  [[ -d "$logs" && ! -L "$logs" ]] || return 0
+  under "$SWEEP_HOME" "$logs" || die "refusing to touch $logs"
+  while IFS= read -r -d '' file; do
+    under "$logs" "$file" || continue
+    rm -f "$file"
+  done < <(each_old_log)
+}
+
+real_machine() {
+  [[ "$(physical "$SWEEP_HOME")" == "$(physical "$HOME")" ]]
+}
+
+sim_count() {
+  local out n
+  command -v xcrun >/dev/null 2>&1 || { printf '0'; return; }
+  real_machine || { printf '0'; return; }
+  out="$(mktemp)"
+  xcrun simctl list devices unavailable >"$out" 2>/dev/null &
+  local pid=$! i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$((i + 1))
+    if [[ "$i" -gt 40 ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -f "$out"
+      printf '0'
+      return
+    fi
+    sleep 0.25
+  done
+  wait "$pid" 2>/dev/null || true
+  n="$(grep -c '(unavailable)' "$out" 2>/dev/null || true)"
+  rm -f "$out"
+  printf '%s' "${n:-0}"
+}
+
+docker_up() {
+  real_machine || return 1
+  [[ -S "$HOME/.docker/run/docker.sock" || -S /var/run/docker.sock ]]
+}
+
+docker_kb() {
+  local sum
+  docker_up || { printf '0'; return; }
+  sum="$(
+    docker system df --format '{{.Reclaimable}}' 2>/dev/null |
+      awk '
+        {
+          if (!match($0, /[0-9.]+/)) next
+          n = substr($0, RSTART, RLENGTH) + 0
+          rest = substr($0, RSTART + RLENGTH)
+          mult = 0
+          if (rest ~ /^TB/) mult = 1024 * 1024 * 1024
+          else if (rest ~ /^GB/) mult = 1024 * 1024
+          else if (rest ~ /^MB/) mult = 1024
+          else if (rest ~ /^KB/) mult = 1
+          else if (rest ~ /^B/) mult = 0
+          s += n * mult
+        }
+        END { printf "%.0f", s + 0 }
+      '
+  )" || sum=0
+  printf '%s' "${sum:-0}"
+}
+
+project_rows() {
+  local root="$SWEEP_HOME"
+  find -x "$root" \
+    \( -type d \( -name Library -o -name .Trash -o -name .git \) \) -prune -o \
+    \( -type d -name node_modules \) -prune -print -o \
+    \( -type d -name target \) -prune -print -o \
+    \( -type d -name .build \) -prune -print -o \
+    \( -type d -name .next \) -prune -print -o \
+    \( -type d -name .turbo \) -prune -print -o \
+    \( -type d -name __pycache__ \) -prune -print
+}
+
+project_ok() {
+  local path="$1" parent name
+  parent="$(dirname "$path")"
+  name="$(basename "$path")"
+  protected "$path" && return 1
+  case "$name" in
+    node_modules|.next|.turbo)
+      [[ -f "$parent/package.json" ]]
+      ;;
+    target)
+      [[ -f "$parent/Cargo.toml" ]]
+      ;;
+    .build)
+      [[ -f "$parent/Package.swift" ]]
+      ;;
+    __pycache__)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+projects_kb() {
+  local path sum
+  sum=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    project_ok "$path" || continue
+    sum=$((sum + $(kb_of "$path")))
+  done < <(project_rows)
+  printf '%s' "$sum"
+}
+
+clean_projects() {
+  local path
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    project_ok "$path" || continue
+    remove_one "$(dirname "$path")" "$path"
+  done < <(project_rows)
+}
+
+measure() {
+  local group="$1"
+  case "$group" in
+    caches) sum_caches ;;
+    homebrew)
+      local c
+      c="$(brew_cache_dir || true)"
+      if [[ -n "$c" ]]; then kb_of "$c"; else printf '0'; fi
+      ;;
+    dev) dev_paths | sum_paths ;;
+    xcode) xcode_paths | sum_paths ;;
+    apps) app_paths | sum_paths ;;
+    quicklook) quicklook_paths | sum_paths ;;
+    logs) logs_kb ;;
+    trash) kb_of "$SWEEP_HOME/.Trash" ;;
+    browsers) browser_paths | sum_paths ;;
+    archives) kb_of "$SWEEP_HOME/Library/Developer/Xcode/Archives" ;;
+    devices) device_paths | sum_paths ;;
+    simulators) printf '0' ;;
+    docker) docker_kb ;;
+    backups) kb_of "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" ;;
+    projects) projects_kb ;;
+    *) die "unknown group: $group" ;;
+  esac
+}
+
+hint_of() {
+  case "$1" in
+    caches) printf 'app caches that rebuild on launch' ;;
+    homebrew) printf 'old downloads and formula versions' ;;
+    dev) printf 'npm, pip, cargo, go, gradle, cocoapods' ;;
+    xcode) printf 'DerivedData and simulator caches' ;;
+    apps) printf 'Slack, Discord, VS Code, Cursor, Figma' ;;
+    quicklook) printf 'Finder thumbnail cache' ;;
+    logs) printf 'files in ~/Library/Logs older than %s days' "$LOG_DAYS" ;;
+    trash) printf 'files already in the Trash' ;;
+    browsers) printf 'page cache only. Cookies stay put' ;;
+    archives) printf 'Xcode archives of old exports' ;;
+    devices) printf 'rebuilt the next time you plug the device in' ;;
+    simulators) printf 'simulators whose runtime is gone' ;;
+    docker) printf 'stopped containers and dangling images' ;;
+    backups) printf 'iPhone and iPad backups, gone for good' ;;
+    projects) printf 'node_modules, Cargo target, Swift .build' ;;
+  esac
+}
+
+clean_group() {
+  local group="$1"
+  case "$group" in
+    caches) clean_caches ;;
+    homebrew)
+      local c
+      c="$(brew_cache_dir || true)"
+      if command -v brew >/dev/null 2>&1 && [[ -n "$c" ]]; then
+        brew cleanup -s --prune=all >/dev/null
+      fi
+      [[ -n "$c" ]] && empty_dir "$c"
+      ;;
+    dev)
+      dev_paths | clean_paths
+      if real_machine && command -v pnpm >/dev/null 2>&1; then
+        pnpm store prune >/dev/null 2>&1 || true
+      fi
+      ;;
+    xcode) xcode_paths | clean_paths ;;
+    apps) app_paths | clean_paths ;;
+    quicklook)
+      quicklook_paths | clean_paths
+      if real_machine && command -v qlmanage >/dev/null 2>&1; then
+        qlmanage -r cache >/dev/null 2>&1 || true
+      fi
+      ;;
+    logs) clean_logs ;;
+    trash) empty_dir "$SWEEP_HOME/.Trash" ;;
+    browsers) browser_paths | clean_paths ;;
+    archives) empty_dir "$SWEEP_HOME/Library/Developer/Xcode/Archives" ;;
+    devices) device_paths | clean_paths ;;
+    simulators)
+      real_machine || return 0
+      command -v xcrun >/dev/null 2>&1 || return 0
+      xcrun simctl delete unavailable >/dev/null 2>&1 || true
+      ;;
+    docker)
+      docker_up || return 0
+      docker system prune -f >/dev/null 2>&1 || true
+      ;;
+    backups)
+      wipe_named "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" "MobileSync/Backup"
+      ;;
+    projects) clean_projects ;;
+    *) die "unknown group: $group" ;;
+  esac
+}
+
+DEFAULT_GROUPS="caches homebrew dev xcode apps quicklook logs trash"
+OPTIONAL_GROUPS="browsers archives devices simulators docker backups projects"
+
+known_group() {
+  case " $DEFAULT_GROUPS $OPTIONAL_GROUPS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+disk_line() {
+  df -k "$SWEEP_HOME" | awk 'NR==2 { print $4, $3, $2 }'
+}
+
+print_disk() {
+  local free used total
+  read -r free used total < <(disk_line)
+  printf '%s%s%s\n' "$B" "sweep" "$Z"
+  printf '  %s free    %s used\n' "$(human "$free")" "$(human "$used")"
+  printf '  %s%s%s\n' "$D" "$(df -h "$SWEEP_HOME" | awk 'NR==2 { print $1 }')" "$Z"
+}
+
+row() {
+  local name="$1" kb="$2" hint="$3"
+  [[ "${kb:-0}" -gt 0 ]] || return 0
+  printf '  %-14s %10s    %s%s%s\n' "$name" "$(human "$kb")" "$D" "$hint" "$Z"
+}
+
+cmd_scan() {
+  local group kb sims
+  print_disk
+  printf '\n  %sSafe to remove%s\n' "$B" "$Z"
+  local any=0
+  for group in $DEFAULT_GROUPS; do
+    status "Measuring $group"
+    kb="$(measure "$group")"
+    clear_status
+    if [[ "${kb:-0}" -gt 0 ]]; then
+      row "$group" "$kb" "$(hint_of "$group")"
+      any=1
+    fi
+  done
+  [[ "$any" -eq 1 ]] || printf '  %snothing sitting in the usual caches%s\n' "$D" "$Z"
+
+  printf '\n  %sOnly when you name them%s\n' "$B" "$Z"
+  any=0
+  for group in browsers archives devices docker backups; do
+    status "Measuring $group"
+    kb="$(measure "$group")"
+    clear_status
+    if [[ "${kb:-0}" -gt 0 ]]; then
+      row "$group" "$kb" "$(hint_of "$group")"
+      any=1
+    fi
+  done
+  status "Checking simulators"
+  sims="$(sim_count)"
+  clear_status
+  if [[ "${sims:-0}" -gt 0 ]]; then
+    printf '  %-14s %10s    %s%s%s\n' "simulators" "$sims" "$D" "$(hint_of simulators)" "$Z"
+    any=1
+  fi
+  [[ "$any" -eq 1 ]] || printf '  %snone of the optional piles are present%s\n' "$D" "$Z"
+
+  printf '\n  %sBuild folders are a separate pass.%s  sweep projects\n' "$D" "$Z"
+  printf '  %sNothing was deleted.%s  sweep clean --yes\n\n' "$D" "$Z"
+}
+
+cmd_clean() {
+  local group kb total before after freed
+  local list="$PICKS"
+  if [[ -n "$ONLY" ]]; then
+    cmd_clean_only
+    return
+  fi
+  [[ -n "$list" ]] || list="$DEFAULT_GROUPS"
+  for group in $list; do
+    known_group "$group" || die "unknown group: $group"
+  done
+
+  total=0
+  print_disk
+  printf '\n'
+  for group in $list; do
+    status "Measuring $group"
+    kb="$(measure "$group")"
+    clear_status
+    if [[ "$group" == "simulators" ]]; then
+      kb="$(sim_count)"
+      [[ "${kb:-0}" -gt 0 ]] || continue
+      printf '  %-14s %10s    %s\n' "$group" "$kb devices" "$(hint_of "$group")"
+      continue
+    fi
+    row "$group" "$kb" "$(hint_of "$group")"
+    total=$((total + kb))
+  done
+
+  if [[ "$total" -eq 0 && "$list" != *"simulators"* ]]; then
+    printf '\n  Nothing to remove.\n\n'
+    return 0
+  fi
+
+  if [[ "$DRY" -eq 1 ]]; then
+    printf '\n  %sWould remove about %s. Pass --yes to delete it.%s\n\n' "$D" "$(human "$total")" "$Z"
+    return 0
+  fi
+
+  printf '\n'
+  for group in $list; do
+    status "Removing $group"
+    clean_group "$group"
+    clear_status
+  done
+
+  after=0
+  for group in $list; do
+    [[ "$group" == "simulators" ]] && continue
+    kb="$(measure "$group")"
+    after=$((after + kb))
+  done
+  before="$total"
+  freed=$((before - after))
+  [[ "$freed" -lt 0 ]] && freed=0
+  printf '  %sFreed about %s.%s\n\n' "$B" "$(human "$freed")" "$Z"
+}
+
+cmd_projects() {
+  local kb
+  print_disk
+  printf '\n  %sBuild folders%s\n' "$B" "$Z"
+  status "Looking for build folders"
+  kb="$(measure projects)"
+  clear_status
+  if [[ "${kb:-0}" -eq 0 ]]; then
+    printf '  %snone found%s\n\n' "$D" "$Z"
+    return 0
+  fi
+  row "projects" "$kb" "$(hint_of projects)"
+  printf '\n  %sNothing was deleted.%s  sweep clean projects --yes\n\n' "$D" "$Z"
+}
+
+cmd_large() {
+  local dir label kb path
+  print_disk
+  printf '\n  %sLargest folders%s\n' "$B" "$Z"
+  printf '  %sThis only looks. It does not delete.%s\n' "$D" "$Z"
+  for dir in "$SWEEP_HOME" "$SWEEP_HOME/Library" "$SWEEP_HOME/Library/Application Support"; do
+    [[ -d "$dir" ]] || continue
+    case "$dir" in
+      "$SWEEP_HOME") label="Home" ;;
+      "$SWEEP_HOME/Library") label="Library" ;;
+      *) label="Application Support" ;;
+    esac
+    printf '\n  %s%s%s\n' "$B" "$label" "$Z"
+    status "Measuring $label"
+    while IFS=$'\t' read -r kb path; do
+      [[ -n "$path" ]] || continue
+      printf '  %10s    %s\n' "$(human "$kb")" "${path#"$SWEEP_HOME"/}"
+    done < <(du -xd 1 "$dir" 2>/dev/null | awk -F '\t' -v root="$dir" '$2 != root { print $1 "\t" $2 }' | sort -nr | awk 'NR <= 8')
+    clear_status
+  done
+  printf '\n'
+}
+
+emit_item() {
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+}
+
+kb_old_logs_under() {
+  local dir="$1" file sum k
+  sum=0
+  [[ -e "$dir" || -L "$dir" ]] || { printf '0'; return; }
+  while IFS= read -r -d '' file; do
+    k="$(du -sk "$file" 2>/dev/null | awk '{print $1}')" || k=0
+    sum=$((sum + ${k:-0}))
+  done < <(find -x "$dir" \
+    \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
+    -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true)
+  printf '%s' "$sum"
+}
+
+clean_old_logs_under() {
+  local dir="$1" logs file
+  logs="$SWEEP_HOME/Library/Logs"
+  under "$logs" "$dir" || return 0
+  while IFS= read -r -d '' file; do
+    under "$logs" "$file" || continue
+    rm -f "$file"
+  done < <(find -x "$dir" \
+    \( -path "*/DiagnosticReports" -o -path "*/DiagnosticReports/*" \) -prune -o \
+    -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null || true)
+}
+
+list_cache_items() {
+  local root="$SWEEP_HOME/Library/Caches" child base sub kb
+  [[ -d "$root" && ! -L "$root" ]] || return 0
+  for child in "$root"/*; do
+    base="$(basename "$child")"
+    if [[ "$base" == "Google" && -d "$child" && ! -L "$child" ]]; then
+      for sub in "$child"/*; do
+        case "$(basename "$sub")" in
+          Chrome|"Chrome Canary"|Chromium) continue ;;
+        esac
+        kb="$(kb_of "$sub")"
+        [[ "${kb:-0}" -gt 0 ]] || continue
+        emit_item "$kb" "Google/$(basename "$sub")" "$sub" path
+      done
+      continue
+    fi
+    if skip_cache_name "$base"; then
+      continue
+    fi
+    kb="$(kb_of "$child")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    emit_item "$kb" "$base" "$child" path
+  done
+}
+
+list_named_paths() {
+  local how="$1" path kb label
+  how="${how:-path}"
+  while IFS= read -r path; do
+    [[ -n "$path" && ( -e "$path" || -L "$path" ) ]] || continue
+    kb="$(kb_of "$path")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    label="${path#"$SWEEP_HOME"/}"
+    emit_item "$kb" "$label" "$path" "$how"
+  done
+}
+
+list_log_items() {
+  local logs="$SWEEP_HOME/Library/Logs" child base kb
+  [[ -d "$logs" && ! -L "$logs" ]] || return 0
+  for child in "$logs"/* "$logs"/.[!.]* "$logs"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    base="$(basename "$child")"
+    [[ "$base" == "DiagnosticReports" ]] && continue
+    kb="$(kb_old_logs_under "$child")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    emit_item "$kb" "$base" "$child" logs
+  done
+}
+
+list_child_items() {
+  local dir="$1" how="$2" prefix="$3" child kb label
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  for child in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    kb="$(kb_of "$child")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    label="${prefix}$(basename "$child")"
+    emit_item "$kb" "$label" "$child" "$how"
+  done
+}
+
+list_items() {
+  local group="$1" path kb c n
+  case "$group" in
+    caches) list_cache_items ;;
+    homebrew)
+      c="$(brew_cache_dir || true)"
+      [[ -n "$c" ]] || return 0
+      kb="$(kb_of "$c")"
+      [[ "${kb:-0}" -gt 0 ]] || return 0
+      emit_item "$kb" "Homebrew downloads" "$c" homebrew
+      ;;
+    dev) dev_paths | list_named_paths path ;;
+    xcode) xcode_paths | list_named_paths path ;;
+    apps) app_paths | list_named_paths app ;;
+    quicklook) quicklook_paths | list_named_paths path ;;
+    logs) list_log_items ;;
+    trash) list_child_items "$SWEEP_HOME/.Trash" trash "" ;;
+    browsers) browser_paths | list_named_paths path ;;
+    archives)
+      list_child_items "$SWEEP_HOME/Library/Developer/Xcode/Archives" path ""
+      ;;
+    devices)
+      while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        list_child_items "$path" path "$(basename "$path") / "
+      done < <(device_paths)
+      ;;
+    simulators)
+      n="$(sim_count)"
+      [[ "${n:-0}" -gt 0 ]] || return 0
+      emit_item "$n" "Unavailable simulators" "-" simulators
+      ;;
+    docker)
+      kb="$(docker_kb)"
+      [[ "${kb:-0}" -gt 0 ]] || return 0
+      emit_item "$kb" "Docker unused data" "-" docker
+      ;;
+    backups)
+      list_child_items "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" backup ""
+      ;;
+    projects)
+      while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        project_ok "$path" || continue
+        kb="$(kb_of "$path")"
+        [[ "${kb:-0}" -gt 0 ]] || continue
+        emit_item "$kb" "${path#"$SWEEP_HOME"/}" "$path" path
+      done < <(project_rows)
+      ;;
+    *) die "unknown group: $group" ;;
+  esac
+}
+
+delete_backup_child() {
+  local path="$1" root real parent
+  root="$SWEEP_HOME/Library/Application Support/MobileSync/Backup"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  under "$root" "$path" || die "refusing to touch $path"
+  real="$(physical "$path")"
+  parent="$(physical "$root")"
+  [[ "$real" == "$parent"/* && "$real" != "$parent" ]] || die "refusing to touch $path"
+  if [[ -L "$path" ]]; then
+    rm "$path"
+    return 0
+  fi
+  rm -rf "$path"
+}
+
+delete_app_cache() {
+  local path="$1"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  under "$SWEEP_HOME" "$path" || die "refusing to touch $path"
+  case "$(basename "$path")" in
+    Cache|CachedData|GPUCache|"Code Cache") ;;
+    *) die "refusing to touch $path" ;;
+  esac
+  if [[ -L "$path" ]]; then
+    rm "$path"
+    return 0
+  fi
+  rm -rf "$path"
+}
+
+delete_item() {
+  local how="$1" path="$2" c
+  case "$how" in
+    path) remove_one "$(dirname "$path")" "$path" ;;
+    app) delete_app_cache "$path" ;;
+    logs) clean_old_logs_under "$path" ;;
+    trash) remove_one "$SWEEP_HOME/.Trash" "$path" ;;
+    backup) delete_backup_child "$path" ;;
+    homebrew)
+      c="$(brew_cache_dir || true)"
+      [[ -n "$c" ]] || return 0
+      [[ "$(physical "$path")" == "$(physical "$c")" ]] || die "refusing to touch $path"
+      if command -v brew >/dev/null 2>&1; then
+        brew cleanup -s --prune=all >/dev/null
+      fi
+      empty_dir "$c"
+      ;;
+    simulators)
+      real_machine || return 0
+      command -v xcrun >/dev/null 2>&1 || return 0
+      xcrun simctl delete unavailable >/dev/null 2>&1 || true
+      ;;
+    docker)
+      docker_up || return 0
+      docker system prune -f >/dev/null 2>&1 || true
+      ;;
+    *) die "refusing to touch $path" ;;
+  esac
+}
+
+only_has() {
+  local name="$1" line
+  [[ -n "$ONLY" ]] || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == "$name" ]] && return 0
+  done <<< "$ONLY"
+  return 1
+}
+
+cmd_items() {
+  local group kb label path how any
+  group="${PICKS%% *}"
+  [[ -n "$group" ]] || die "Name a group. Example: sweep items caches"
+  known_group "$group" || die "unknown group: $group"
+  any=0
+  while IFS=$'\t' read -r kb label path how; do
+    [[ -n "$label" ]] || continue
+    printf '  %10s    %s\n' "$(human "$kb")" "$label"
+    any=1
+  done < <(list_items "$group")
+  [[ "$any" -eq 1 ]] || printf '  Nothing in %s.\n' "$group"
+}
+
+cmd_clean_only() {
+  local group kb label path how base matched sum
+  [[ -n "$PICKS" ]] || die "Name a group. Example: sweep clean caches --only Spotify --yes"
+  for group in $PICKS; do
+    known_group "$group" || die "unknown group: $group"
+  done
+  matched=0
+  sum=0
+  for group in $PICKS; do
+    while IFS=$'\t' read -r kb label path how; do
+      [[ -n "$label" ]] || continue
+      base="$(basename "$path")"
+      if only_has "$label" || only_has "$base"; then
+        printf '  %10s    %s\n' "$(human "$kb")" "$label"
+        sum=$((sum + kb))
+        matched=1
+      fi
+    done < <(list_items "$group")
+  done
+  if [[ "$matched" -eq 0 ]]; then
+    die "No folder with that name. Run: sweep items ${PICKS%% *}"
+  fi
+  if [[ "$DRY" -eq 1 ]]; then
+    printf '  Would remove about %s. Pass --yes to delete it.\n' "$(human "$sum")"
+    return 0
+  fi
+  for group in $PICKS; do
+    while IFS=$'\t' read -r kb label path how; do
+      [[ -n "$label" ]] || continue
+      base="$(basename "$path")"
+      if only_has "$label" || only_has "$base"; then
+        delete_item "$how" "$path"
+      fi
+    done < <(list_items "$group")
+  done
+  printf '  Freed about %s.\n' "$(human "$sum")"
+}
+
+MENU_DIR=""
+SCREEN="home"
+GROUP=""
+NOTE=""
+AUTO_MENU=0
+
+menu_blank() {
+  if [[ -t 1 ]]; then
+    printf '\033[H\033[2J'
+  fi
+}
+
+path_selected() {
+  [[ -f "$MENU_DIR/selpaths" ]] || return 1
+  grep -F -x -q -- "$1" "$MENU_DIR/selpaths"
+}
+
+toggle_path() {
+  local path="$1" next
+  next="$MENU_DIR/selpaths.next"
+  if path_selected "$path"; then
+    grep -F -x -v -- "$path" "$MENU_DIR/selpaths" >"$next" || true
+    mv "$next" "$MENU_DIR/selpaths"
+  else
+    printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
+  fi
+}
+
+menu_draw_home() {
+  local group kb n section
+  menu_blank
+  print_disk
+  if [[ -n "$NOTE" ]]; then
+    printf '\n  %s\n' "$NOTE"
+    NOTE=""
+  fi
+  printf '\n  Type a number to open that list and tick folders.\n'
+  printf '  Nothing is deleted until you type the word yes.\n'
+  : >"$MENU_DIR/home"
+  n=0
+  for section in safe ask; do
+    if [[ "$section" == "safe" ]]; then
+      printf '\n  %sSafe%s\n' "$B" "$Z"
+    else
+      printf '\n  %sOnly if you ask%s\n' "$B" "$Z"
+    fi
+    for group in $DEFAULT_GROUPS $OPTIONAL_GROUPS; do
+      if [[ "$section" == "safe" ]]; then
+        case " $DEFAULT_GROUPS " in
+          *" $group "*) ;;
+          *) continue ;;
+        esac
+      else
+        case " $OPTIONAL_GROUPS " in
+          *" $group "*) ;;
+          *) continue ;;
+        esac
+      fi
+      status "Measuring $group"
+      if [[ "$group" == "simulators" ]]; then
+        kb="$(sim_count)"
+      else
+        kb="$(measure "$group")"
+      fi
+      clear_status
+      [[ "${kb:-0}" -gt 0 ]] || continue
+      n=$((n + 1))
+      printf '%s\t%s\t%s\n' "$n" "$group" "$kb" >>"$MENU_DIR/home"
+      if [[ "$group" == "simulators" ]]; then
+        printf '  %2d  %-14s %10s    %s%s%s\n' "$n" "$group" "$kb" "$D" "$(hint_of "$group")" "$Z"
+      else
+        printf '  %2d  %-14s %10s    %s%s%s\n' "$n" "$group" "$(human "$kb")" "$D" "$(hint_of "$group")" "$Z"
+      fi
+    done
+  done
+  if [[ "$n" -eq 0 ]]; then
+    printf '\n  Nothing to clean.\n'
+  fi
+  cat <<EOF
+
+  A number opens that list.
+  all    delete every safe group, after you type yes
+  large  show the biggest folders, and delete nothing
+  help   show this again
+  quit   leave
+
+EOF
+}
+
+menu_draw_group() {
+  local group="$1" n kb label path how mark ticked sum base
+  menu_blank
+  print_disk
+  if [[ -n "$NOTE" ]]; then
+    printf '\n  %s\n' "$NOTE"
+    NOTE=""
+  fi
+  printf '\n  %s%s%s\n' "$B" "$group" "$Z"
+  printf '  %s\n' "$(hint_of "$group")"
+  printf '  Tick the lines you want. Nothing goes until you type yes.\n'
+  : >"$MENU_DIR/items"
+  n=0
+  ticked=0
+  sum=0
+  while IFS=$'\t' read -r kb label path how; do
+    [[ -n "$label" ]] || continue
+    n=$((n + 1))
+    printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$kb" "$label" "$path" "$how" >>"$MENU_DIR/items"
+    if path_selected "$path"; then
+      mark="[x]"
+      ticked=$((ticked + 1))
+      sum=$((sum + kb))
+    else
+      mark="[ ]"
+    fi
+    base="$label"
+    if [[ ${#base} -gt 48 ]]; then
+      base="...${base:$((${#base} - 45))}"
+    fi
+    printf '  %s %2d  %-48s %10s\n' "$mark" "$n" "$base" "$(human "$kb")"
+  done < <(list_items "$group")
+  if [[ "$n" -eq 0 ]]; then
+    printf '\n  Nothing in this list.\n'
+  elif [[ "$ticked" -gt 0 ]]; then
+    printf '\n  Ticked: %s, about %s.\n' "$ticked" "$(human "$sum")"
+  else
+    printf '\n  Nothing ticked yet.\n'
+  fi
+  cat <<EOF
+
+  A number, or a name, ticks that line. 1 3 ticks two lines.
+  all     tick every line          none   untick every line
+  clean   delete the ticked lines, after you type yes
+  back    return to the first list
+  quit    leave                    help   show this again
+
+EOF
+}
+
+menu_toggle_word() {
+  local word="$1" n group kb label path how base
+  if [[ "$SCREEN" == "home" ]]; then
+    [[ -f "$MENU_DIR/home" ]] || return 1
+    while IFS=$'\t' read -r n group kb; do
+      if [[ "$word" == "$n" || "$word" == "$group" ]]; then
+        SCREEN="group"
+        GROUP="$group"
+        : >"$MENU_DIR/selpaths"
+        return 0
+      fi
+    done <"$MENU_DIR/home"
+    return 1
+  fi
+  [[ -f "$MENU_DIR/items" ]] || return 1
+  while IFS=$'\t' read -r n kb label path how; do
+    base="$(basename "$path")"
+    if [[ "$word" == "$n" || "$word" == "$label" || "$word" == "$base" ]]; then
+      toggle_path "$path"
+      return 0
+    fi
+  done <"$MENU_DIR/items"
+  return 1
+}
+
+menu_confirm_yes() {
+  local answer
+  printf '  > '
+  IFS= read -r answer || exit 0
+  answer="${answer//$'\r'/}"
+  [[ "$answer" == "yes" ]]
+}
+
+menu_clean_selected() {
+  local n kb label path how sum ticked
+  [[ -s "$MENU_DIR/selpaths" ]] || {
+    NOTE="Tick a number first."
+    return 0
+  }
+  printf '\n  This will delete:\n'
+  sum=0
+  ticked=0
+  while IFS=$'\t' read -r n kb label path how; do
+    path_selected "$path" || continue
+    printf '    %10s    %s\n' "$(human "$kb")" "$label"
+    sum=$((sum + kb))
+    ticked=$((ticked + 1))
+  done <"$MENU_DIR/items"
+  if [[ "$ticked" -eq 0 ]]; then
+    NOTE="Tick a number first."
+    return 0
+  fi
+  printf '\n  About %s. Type yes to delete, or press return to keep it.\n' "$(human "$sum")"
+  if menu_confirm_yes; then
+    while IFS=$'\t' read -r n kb label path how; do
+      path_selected "$path" || continue
+      delete_item "$how" "$path"
+    done <"$MENU_DIR/items"
+    : >"$MENU_DIR/selpaths"
+    NOTE="Deleted."
+    SCREEN="home"
+  else
+    NOTE="Kept. Nothing was deleted."
+  fi
+}
+
+menu_all_safe() {
+  local group
+  printf '\n  This clears caches, Homebrew, dev tools, Xcode build data,\n'
+  printf '  app caches, old logs, Quick Look, and the Trash.\n'
+  printf '  Backups, browsers, and device files stay.\n'
+  printf '  Type yes to delete them, or press return to cancel.\n'
+  if menu_confirm_yes; then
+    for group in $DEFAULT_GROUPS; do
+      clean_group "$group"
+    done
+    NOTE="Deleted."
+  else
+    NOTE="Kept. Nothing was deleted."
+  fi
+}
+
+menu_select_all() {
+  local n kb label path how
+  : >"$MENU_DIR/selpaths"
+  while IFS=$'\t' read -r n kb label path how; do
+    [[ -n "$path" ]] || continue
+    printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
+  done <"$MENU_DIR/items"
+}
+
+menu_handle_word() {
+  local word="$1"
+  case "$word" in
+    quit|q|exit)
+      printf '  Bye.\n'
+      exit 0
+      ;;
+    help|\?)
+      return 0
+      ;;
+    large)
+      [[ "$SCREEN" == "home" ]] || return 1
+      cmd_large
+      printf '  Press return to go back.\n  > '
+      IFS= read -r _ || exit 0
+      return 0
+      ;;
+    back|home)
+      [[ "$SCREEN" == "group" ]] || return 1
+      SCREEN="home"
+      return 0
+      ;;
+    all)
+      if [[ "$SCREEN" == "home" ]]; then
+        menu_all_safe
+      else
+        menu_select_all
+      fi
+      return 0
+      ;;
+    none)
+      [[ "$SCREEN" == "group" ]] || return 1
+      : >"$MENU_DIR/selpaths"
+      return 0
+      ;;
+    clean)
+      if [[ "$SCREEN" == "group" ]]; then
+        menu_clean_selected
+        return 0
+      fi
+      NOTE="Open a number first. all deletes every safe group."
+      return 0
+      ;;
+    *)
+      menu_toggle_word "$word" || return 1
+      ;;
+  esac
+}
+
+cmd_menu() {
+  local reply word oldifs
+  MENU_DIR="$(mktemp -d)"
+  : >"$MENU_DIR/selpaths"
+  SCREEN="home"
+  while true; do
+    if [[ "$SCREEN" == "home" ]]; then
+      menu_draw_home
+    else
+      menu_draw_group "$GROUP"
+    fi
+    printf '  > '
+    IFS= read -r reply || break
+    reply="${reply//$'\r'/}"
+    [[ -n "$reply" ]] || continue
+    set -f
+    oldifs="$IFS"
+    IFS=' '
+    # shellcheck disable=SC2086
+    set -- $reply
+    IFS="$oldifs"
+    set +f
+    if [[ $# -eq 1 ]]; then
+      if ! menu_handle_word "$1"; then
+        NOTE="I do not know \"$1\". Type help."
+      fi
+    else
+      for word in "$@"; do
+        case "$word" in
+          quit|q|exit|help|\?|large|back|home|all|none|clean)
+            NOTE="Type $word on its own line."
+            ;;
+          *)
+            menu_toggle_word "$word" || NOTE="I do not know \"$word\"."
+            ;;
+        esac
+      done
+    fi
+  done
+  rm -rf "$MENU_DIR"
+}
+
+usage() {
+  cat <<EOF
+sweep ${VERSION} — a quiet disk cleaner for macOS
+
+  sweep                      open the menu
+  sweep scan                 print the lists and exit
+  sweep items caches         show folders you can tick
+  sweep clean caches --only NAME --yes
+                             delete one folder
+  sweep clean --yes          delete every safe group
+  sweep large                biggest folders, look only
+
+In the menu, type a number, tick the folders, then type clean.
+Type the word yes when it asks. Anything else cancels.
+
+Safe groups, included in "all" and "sweep clean --yes":
+  caches homebrew dev xcode apps quicklook logs trash
+
+Named groups, never included unless you open them:
+  browsers archives devices simulators docker backups projects
+
+Nothing here frees RAM, scans for viruses, or phones home.
+Documents, Desktop, Photos, Mail, Messages, and Preferences are never deleted.
+iPhone backups are deleted only if you open backups and tick them.
+
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  AUTO_MENU=1
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    scan|clean|large|help|menu|items)
+      CMD="$1"
+      ;;
+    projects)
+      if [[ "$CMD" == "scan" && -z "$PICKS" ]]; then
+        CMD="projects"
+      else
+        known_group "$1" || die "unknown group: $1"
+        PICKS="${PICKS:+$PICKS }$1"
+      fi
+      ;;
+    --yes|-y)
+      DRY=0
+      ;;
+    --only)
+      shift
+      [[ $# -gt 0 ]] || die "--only needs the folder name"
+      ONLY="${ONLY}"$'\n'"$1"
+      ;;
+    --dry-run)
+      DRY=1
+      ;;
+    --version|-V)
+      printf '%s\n' "$VERSION"
+      exit 0
+      ;;
+    -h|--help)
+      CMD="help"
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      known_group "$1" || die "unknown group: $1"
+      PICKS="${PICKS:+$PICKS }$1"
+      ;;
+  esac
+  shift
+done
+
+case "$CMD" in
+  scan)
+    if [[ "$AUTO_MENU" -eq 1 && ( -n "${SWEEP_MENU:-}" || ( -t 0 && -t 1 ) ) ]]; then
+      cmd_menu
+    else
+      cmd_scan
+    fi
+    ;;
+  menu) cmd_menu ;;
+  items) cmd_items ;;
+  clean) cmd_clean ;;
+  projects) cmd_projects ;;
+  large) cmd_large ;;
+  help) usage ;;
+esac
