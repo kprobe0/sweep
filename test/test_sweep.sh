@@ -103,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.4.0'
+"$SWEEP" --version | grep -q '0.5.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
