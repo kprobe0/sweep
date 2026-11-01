@@ -12,8 +12,10 @@ From Terminal:
 
 ```bash
 brew tap kprobe0/sweep https://github.com/kprobe0/sweep
-brew install --HEAD kprobe0/sweep/sweep
+brew install kprobe0/sweep/sweep
 ```
+
+That installs the [0.12.0 archive](https://github.com/kprobe0/sweep/archive/refs/tags/v0.12.0.tar.gz). Its SHA-256 is `0f9f5d79b3af56010d968a98d801b8703310b1b9a93baff43c125513f21eefaf`.
 
 Or paste this and press Return:
 
