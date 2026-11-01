@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.2.0
+VERSION=0.3.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -739,6 +739,96 @@ emit_item() {
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
 }
 
+pretty_bundle() {
+  local id="$1" part prev first rest
+  id="${id#com.}"
+  id="${id#org.}"
+  id="${id#net.}"
+  id="${id#io.}"
+  part="${id##*.}"
+  case "$part" in
+    client|mac|osx|macos|helper|desktop|agent|browser|app)
+      prev="${id%.*}"
+      [[ "$prev" == "$id" ]] || part="${prev##*.}"
+      ;;
+  esac
+  first="$(printf '%s' "$part" | cut -c1 | tr '[:lower:]' '[:upper:]')"
+  rest="$(printf '%s' "$part" | cut -c2-)"
+  printf '%s%s' "$first" "$rest"
+}
+
+pretty_label() {
+  local label="$1" path="$2" base parent
+  base="$(basename "$path")"
+  parent="$(basename "$(dirname "$path")")"
+  case "$path" in
+    */.npm) printf 'npm downloads'; return ;;
+    */.cache/pip|*/Library/Caches/pip) printf 'pip downloads'; return ;;
+    */.cache/uv) printf 'uv downloads'; return ;;
+    */.yarn/cache|*/Library/Caches/Yarn) printf 'Yarn downloads'; return ;;
+    */Library/Caches/pnpm) printf 'pnpm downloads'; return ;;
+    */.cargo/registry/cache) printf 'Rust downloads'; return ;;
+    */.cargo/registry/src) printf 'Rust source'; return ;;
+    */.cargo/git/checkouts) printf 'Rust checkouts'; return ;;
+    */Caches/go-build|*/.cache/go-build) printf 'Go build cache'; return ;;
+    */.gradle/caches) printf 'Gradle cache'; return ;;
+    */Library/Caches/CocoaPods) printf 'CocoaPods'; return ;;
+    */Library/Caches/org.carthage.CarthageKit) printf 'Carthage'; return ;;
+    */Library/Caches/zig) printf 'Zig cache'; return ;;
+    */.cache/swift-package-manager|*/org.swift.swiftpm) printf 'Swift packages'; return ;;
+    */Xcode/DerivedData) printf 'Xcode build files'; return ;;
+    */CoreSimulator/Caches) printf 'Simulator cache'; return ;;
+    */Caches/com.apple.dt.Xcode) printf 'Xcode cache'; return ;;
+    */node_modules) printf 'Modules in %s' "$(basename "$(dirname "$path")")"; return ;;
+    */__pycache__) printf 'Python cache in %s' "$parent"; return ;;
+    */.next) printf 'Next.js build in %s' "$parent"; return ;;
+    */.turbo) printf 'Turbo cache in %s' "$parent"; return ;;
+    */.build) printf 'Swift build in %s' "$parent"; return ;;
+  esac
+  case "$base" in
+    target)
+      if [[ -f "$(dirname "$path")/Cargo.toml" ]]; then
+        printf 'Rust build in %s' "$parent"
+        return
+      fi
+      ;;
+    Cache|CachedData|GPUCache|"Code Cache")
+      case "$parent" in
+        Code) printf 'VS Code cache'; return ;;
+        "Code - Insiders") printf 'VS Code Insiders cache'; return ;;
+        Cursor) printf 'Cursor cache'; return ;;
+        *) printf '%s cache' "$parent"; return ;;
+      esac
+      ;;
+    com.spotify.client) printf 'Spotify'; return ;;
+    com.apple.helpd) printf 'Help viewer'; return ;;
+    com.apple.QuickLook.thumbnailcache|com.apple.QuickLook.ThumbnailsAgent)
+      printf 'Finder thumbnails'
+      return
+      ;;
+  esac
+  case "$label" in
+    "iOS DeviceSupport / "*) printf 'iPhone support %s' "${label#iOS DeviceSupport / }"; return ;;
+    "watchOS DeviceSupport / "*) printf 'Watch support %s' "${label#watchOS DeviceSupport / }"; return ;;
+    "tvOS DeviceSupport / "*) printf 'TV support %s' "${label#tvOS DeviceSupport / }"; return ;;
+    "visionOS DeviceSupport / "*) printf 'Vision support %s' "${label#visionOS DeviceSupport / }"; return ;;
+    "Google/"*) printf '%s' "${label#Google/}"; return ;;
+  esac
+  case "$base" in
+    com.*|org.*|net.*|io.*) pretty_bundle "$base"; return ;;
+  esac
+  printf '%s' "$label"
+}
+
+sorted_items() {
+  local group="$1" kb label path how plain
+  while IFS=$'\t' read -r kb label path how; do
+    [[ -n "$label" ]] || continue
+    plain="$(pretty_label "$label" "$path" "$group")"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$kb" "$plain" "$label" "$path" "$how"
+  done < <(list_items "$group") | sort -nr
+}
+
 kb_old_logs_under() {
   local dir="$1" file sum k
   sum=0
@@ -955,16 +1045,25 @@ cmd_items() {
   [[ -n "$group" ]] || die "Name a group. Example: sweep items caches"
   known_group "$group" || die "unknown group: $group"
   any=0
-  while IFS=$'\t' read -r kb label path how; do
+  while IFS=$'\t' read -r kb plain label path how; do
     [[ -n "$label" ]] || continue
-    printf '  %10s    %s\n' "$(human "$kb")" "$label"
+    if [[ "$plain" == "$label" ]]; then
+      printf '  %10s    %s\n' "$(human "$kb")" "$plain"
+    else
+      printf '  %10s    %s    %s%s%s\n' "$(human "$kb")" "$plain" "$D" "$label" "$Z"
+    fi
     any=1
-  done < <(list_items "$group")
+  done < <(sorted_items "$group")
   [[ "$any" -eq 1 ]] || printf '  Nothing in %s.\n' "$group"
 }
 
+name_matches() {
+  local want="$1" plain="$2" label="$3" base="$4"
+  only_has "$plain" || only_has "$label" || only_has "$base" || only_has "$want"
+}
+
 cmd_clean_only() {
-  local group kb label path how base matched sum
+  local group kb plain label path how base matched sum
   [[ -n "$PICKS" ]] || die "Name a group. Example: sweep clean caches --only Spotify --yes"
   for group in $PICKS; do
     known_group "$group" || die "unknown group: $group"
@@ -972,15 +1071,15 @@ cmd_clean_only() {
   matched=0
   sum=0
   for group in $PICKS; do
-    while IFS=$'\t' read -r kb label path how; do
+    while IFS=$'\t' read -r kb plain label path how; do
       [[ -n "$label" ]] || continue
       base="$(basename "$path")"
-      if only_has "$label" || only_has "$base"; then
-        printf '  %10s    %s\n' "$(human "$kb")" "$label"
+      if name_matches "$plain" "$plain" "$label" "$base"; then
+        printf '  %10s    %s\n' "$(human "$kb")" "$plain"
         sum=$((sum + kb))
         matched=1
       fi
-    done < <(list_items "$group")
+    done < <(sorted_items "$group")
   done
   if [[ "$matched" -eq 0 ]]; then
     die "No folder with that name. Run: sweep items ${PICKS%% *}"
@@ -990,13 +1089,13 @@ cmd_clean_only() {
     return 0
   fi
   for group in $PICKS; do
-    while IFS=$'\t' read -r kb label path how; do
+    while IFS=$'\t' read -r kb plain label path how; do
       [[ -n "$label" ]] || continue
       base="$(basename "$path")"
-      if only_has "$label" || only_has "$base"; then
+      if name_matches "$plain" "$plain" "$label" "$base"; then
         delete_item "$how" "$path"
       fi
-    done < <(list_items "$group")
+    done < <(sorted_items "$group")
   done
   printf '  Freed about %s.\n' "$(human "$sum")"
 }
@@ -1006,6 +1105,9 @@ SCREEN="home"
 GROUP=""
 NOTE=""
 AUTO_MENU=0
+PAGE=1
+FILTER=""
+PAGE_SIZE=12
 
 menu_blank() {
   if [[ -t 1 ]]; then
@@ -1029,16 +1131,127 @@ toggle_path() {
   fi
 }
 
-menu_draw_home() {
-  local group kb n section
-  menu_blank
-  print_disk
+fold_case() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+text_has() {
+  local hay needle
+  hay="$(fold_case "$1")"
+  needle="$(fold_case "$2")"
+  [[ -n "$needle" && "$hay" == *"$needle"* ]]
+}
+
+forget_catalog() {
+  rm -f "$MENU_DIR/catalog"
+}
+
+ensure_catalog() {
+  local group kb plain label path how
+  [[ -f "$MENU_DIR/catalog" ]] && return 0
+  : >"$MENU_DIR/catalog.tmp"
+  for group in $DEFAULT_GROUPS $OPTIONAL_GROUPS; do
+    [[ "$group" == "simulators" ]] && continue
+    status "Measuring $group"
+    while IFS=$'\t' read -r kb plain label path how; do
+      [[ -n "$path" ]] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$kb" "$plain" "$label" "$path" "$how" "$group" >>"$MENU_DIR/catalog.tmp"
+    done < <(sorted_items "$group")
+  done
+  clear_status
+  sort -nr "$MENU_DIR/catalog.tmp" >"$MENU_DIR/catalog"
+  rm -f "$MENU_DIR/catalog.tmp"
+}
+
+care_word() {
+  case " $OPTIONAL_GROUPS " in
+    *" $1 "*) printf 'ask first' ;;
+    *) printf 'safe' ;;
+  esac
+}
+
+menu_note() {
   if [[ -n "$NOTE" ]]; then
     printf '\n  %s\n' "$NOTE"
     NOTE=""
   fi
-  printf '\n  Type a number to open that list and tick folders.\n'
-  printf '  Nothing is deleted until you type the word yes.\n'
+}
+
+menu_draw_home() {
+  local kb plain label path how group n shown mark ticked sum care start end total
+  menu_blank
+  print_disk
+  menu_note
+  ensure_catalog
+  printf '\n  %sBiggest folders%s\n' "$B" "$Z"
+  printf '  Type a number to tick one. Nothing is deleted until you type yes.\n'
+  if [[ -n "$FILTER" ]]; then
+    printf '  Showing names that match "%s". Type show for the full list.\n' "$FILTER"
+  fi
+  : >"$MENU_DIR/items"
+  n=0
+  ticked=0
+  sum=0
+  total=0
+  while IFS=$'\t' read -r kb plain label path how group; do
+    [[ -n "$path" ]] || continue
+    if [[ -n "$FILTER" ]] && ! text_has "$plain $label" "$FILTER"; then
+      continue
+    fi
+    total=$((total + 1))
+    n=$((n + 1))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$kb" "$plain" "$label" "$path" "$how" "$group" >>"$MENU_DIR/items"
+    if path_selected "$path"; then
+      ticked=$((ticked + 1))
+      sum=$((sum + kb))
+    fi
+  done <"$MENU_DIR/catalog"
+  start=$(((PAGE - 1) * PAGE_SIZE + 1))
+  end=$((PAGE * PAGE_SIZE))
+  if [[ "$total" -eq 0 ]]; then
+    printf '\n  Nothing to clean.\n'
+  else
+    shown=0
+    while IFS=$'\t' read -r n kb plain label path how group; do
+      [[ "$n" -ge "$start" && "$n" -le "$end" ]] || continue
+      shown=1
+      if path_selected "$path"; then
+        mark="[x]"
+      else
+        mark="[ ]"
+      fi
+      care="$(care_word "$group")"
+      printf '  %s %2d  %10s   %-28s %s%s%s\n' "$mark" "$n" "$(human "$kb")" "${plain:0:28}" "$D" "$care" "$Z"
+    done <"$MENU_DIR/items"
+    [[ "$shown" -eq 1 ]] || printf '\n  No more lines on this page. Type prev.\n'
+  fi
+  if [[ "$ticked" -gt 0 ]]; then
+    printf '\n  Ticked: %s, about %s.\n' "$ticked" "$(human "$sum")"
+  fi
+  if [[ "$total" -gt "$PAGE_SIZE" ]]; then
+    printf '\n  Page %s. Type more or prev.\n' "$PAGE"
+  fi
+  cat <<EOF
+
+  1 3      tick those lines          Spotify   tick the line named Spotify
+  clean    delete ticked lines, after you type yes
+  all      tick every line           none      untick every line
+  caches   open one list, also: dev trash browsers backups
+  groups   the short list of those names
+  more     next page                 find music   only matching names
+  safe     delete the usual caches, after you type yes
+  large    biggest folders in Home, delete nothing
+  quit     leave                     help      show this again
+
+EOF
+}
+
+menu_draw_groups() {
+  local group kb n section
+  menu_blank
+  print_disk
+  menu_note
+  printf '\n  Type a number, or a name like caches, to open that list.\n'
   : >"$MENU_DIR/home"
   n=0
   for section in safe ask; do
@@ -1076,28 +1289,22 @@ menu_draw_home() {
       fi
     done
   done
-  if [[ "$n" -eq 0 ]]; then
-    printf '\n  Nothing to clean.\n'
-  fi
+  [[ "$n" -eq 0 ]] && printf '\n  Nothing to clean.\n'
   cat <<EOF
 
-  A number opens that list.
-  all    delete every safe group, after you type yes
-  large  show the biggest folders, and delete nothing
-  help   show this again
-  quit   leave
+  back    biggest folders
+  safe    delete every safe group, after you type yes
+  quit    leave
 
 EOF
 }
 
 menu_draw_group() {
-  local group="$1" n kb label path how mark ticked sum base
+  local group="$1" n kb plain label path how mark ticked sum shown start end total care
   menu_blank
   print_disk
-  if [[ -n "$NOTE" ]]; then
-    printf '\n  %s\n' "$NOTE"
-    NOTE=""
-  fi
+  menu_note
+  ensure_catalog
   printf '\n  %s%s%s\n' "$B" "$group" "$Z"
   printf '  %s\n' "$(hint_of "$group")"
   printf '  Tick the lines you want. Nothing goes until you type yes.\n'
@@ -1105,63 +1312,99 @@ menu_draw_group() {
   n=0
   ticked=0
   sum=0
-  while IFS=$'\t' read -r kb label path how; do
-    [[ -n "$label" ]] || continue
+  total=0
+  while IFS=$'\t' read -r kb plain label path how care; do
+    [[ "$care" == "$group" ]] || continue
+    if [[ -n "$FILTER" ]] && ! text_has "$plain $label" "$FILTER"; then
+      continue
+    fi
+    total=$((total + 1))
     n=$((n + 1))
-    printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$kb" "$label" "$path" "$how" >>"$MENU_DIR/items"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$kb" "$plain" "$label" "$path" "$how" >>"$MENU_DIR/items"
     if path_selected "$path"; then
-      mark="[x]"
       ticked=$((ticked + 1))
       sum=$((sum + kb))
-    else
-      mark="[ ]"
     fi
-    base="$label"
-    if [[ ${#base} -gt 48 ]]; then
-      base="...${base:$((${#base} - 45))}"
-    fi
-    printf '  %s %2d  %-48s %10s\n' "$mark" "$n" "$base" "$(human "$kb")"
-  done < <(list_items "$group")
-  if [[ "$n" -eq 0 ]]; then
+  done <"$MENU_DIR/catalog"
+  start=$(((PAGE - 1) * PAGE_SIZE + 1))
+  end=$((PAGE * PAGE_SIZE))
+  shown=0
+  if [[ "$total" -eq 0 ]]; then
     printf '\n  Nothing in this list.\n'
-  elif [[ "$ticked" -gt 0 ]]; then
-    printf '\n  Ticked: %s, about %s.\n' "$ticked" "$(human "$sum")"
   else
-    printf '\n  Nothing ticked yet.\n'
+    while IFS=$'\t' read -r n kb plain label path how; do
+      [[ "$n" -ge "$start" && "$n" -le "$end" ]] || continue
+      shown=1
+      if path_selected "$path"; then
+        mark="[x]"
+      else
+        mark="[ ]"
+      fi
+      printf '  %s %2d  %10s   %s\n' "$mark" "$n" "$(human "$kb")" "$plain"
+    done <"$MENU_DIR/items"
+    [[ "$shown" -eq 1 ]] || printf '\n  No more lines on this page. Type prev.\n'
+  fi
+  if [[ "$ticked" -gt 0 ]]; then
+    printf '\n  Ticked: %s, about %s.\n' "$ticked" "$(human "$sum")"
+  fi
+  if [[ "$total" -gt "$PAGE_SIZE" ]]; then
+    printf '\n  Page %s. Type more or prev.\n' "$PAGE"
   fi
   cat <<EOF
 
-  A number, or a name, ticks that line. 1 3 ticks two lines.
-  all     tick every line          none   untick every line
+  A number or a name ticks that line. 1 3 ticks two lines.
+  all     tick every line here     none   untick every line
   clean   delete the ticked lines, after you type yes
-  back    return to the first list
-  quit    leave                    help   show this again
+  back    biggest folders          quit   leave
 
 EOF
 }
 
+menu_open_group() {
+  SCREEN="group"
+  GROUP="$1"
+  PAGE=1
+  FILTER=""
+}
+
 menu_toggle_word() {
-  local word="$1" n group kb label path how base
-  if [[ "$SCREEN" == "home" ]]; then
+  local word="$1" n kb plain label path how group base hits first
+  if [[ "$SCREEN" == "groups" ]]; then
     [[ -f "$MENU_DIR/home" ]] || return 1
     while IFS=$'\t' read -r n group kb; do
       if [[ "$word" == "$n" || "$word" == "$group" ]]; then
-        SCREEN="group"
-        GROUP="$group"
-        : >"$MENU_DIR/selpaths"
+        menu_open_group "$group"
         return 0
       fi
     done <"$MENU_DIR/home"
     return 1
   fi
+  if [[ "$SCREEN" == "home" ]] && known_group "$word"; then
+    menu_open_group "$word"
+    return 0
+  fi
   [[ -f "$MENU_DIR/items" ]] || return 1
-  while IFS=$'\t' read -r n kb label path how; do
+  hits=0
+  first=""
+  while IFS=$'\t' read -r n kb plain label path how group; do
     base="$(basename "$path")"
-    if [[ "$word" == "$n" || "$word" == "$label" || "$word" == "$base" ]]; then
+    if [[ "$word" == "$n" ]]; then
       toggle_path "$path"
       return 0
     fi
+    if [[ "$(fold_case "$word")" == "$(fold_case "$plain")" || "$word" == "$label" || "$word" == "$base" ]]; then
+      hits=$((hits + 1))
+      first="$path"
+    fi
   done <"$MENU_DIR/items"
+  if [[ "$hits" -eq 1 ]]; then
+    toggle_path "$first"
+    return 0
+  fi
+  if [[ "$hits" -gt 1 ]]; then
+    NOTE="Several lines match \"$word\". Type the number."
+    return 0
+  fi
   return 1
 }
 
@@ -1182,9 +1425,9 @@ menu_clean_selected() {
   printf '\n  This will delete:\n'
   sum=0
   ticked=0
-  while IFS=$'\t' read -r n kb label path how; do
+  while IFS=$'\t' read -r n kb plain label path how group; do
     path_selected "$path" || continue
-    printf '    %10s    %s\n' "$(human "$kb")" "$label"
+    printf '    %10s    %s\n' "$(human "$kb")" "$plain"
     sum=$((sum + kb))
     ticked=$((ticked + 1))
   done <"$MENU_DIR/items"
@@ -1194,13 +1437,15 @@ menu_clean_selected() {
   fi
   printf '\n  About %s. Type yes to delete, or press return to keep it.\n' "$(human "$sum")"
   if menu_confirm_yes; then
-    while IFS=$'\t' read -r n kb label path how; do
+    while IFS=$'\t' read -r n kb plain label path how group; do
       path_selected "$path" || continue
       delete_item "$how" "$path"
     done <"$MENU_DIR/items"
     : >"$MENU_DIR/selpaths"
+    forget_catalog
     NOTE="Deleted."
     SCREEN="home"
+    PAGE=1
   else
     NOTE="Kept. Nothing was deleted."
   fi
@@ -1216,16 +1461,18 @@ menu_all_safe() {
     for group in $DEFAULT_GROUPS; do
       clean_group "$group"
     done
+    forget_catalog
     NOTE="Deleted."
+    PAGE=1
   else
     NOTE="Kept. Nothing was deleted."
   fi
 }
 
 menu_select_all() {
-  local n kb label path how
+  local n kb plain label path how group
   : >"$MENU_DIR/selpaths"
-  while IFS=$'\t' read -r n kb label path how; do
+  while IFS=$'\t' read -r n kb plain label path how group; do
     [[ -n "$path" ]] || continue
     printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
   done <"$MENU_DIR/items"
@@ -1248,13 +1495,38 @@ menu_handle_word() {
       IFS= read -r _ || exit 0
       return 0
       ;;
+    groups)
+      SCREEN="groups"
+      PAGE=1
+      FILTER=""
+      return 0
+      ;;
     back|home)
-      [[ "$SCREEN" == "group" ]] || return 1
+      [[ "$SCREEN" == "home" ]] && return 1
       SCREEN="home"
+      PAGE=1
+      FILTER=""
+      return 0
+      ;;
+    more|next)
+      PAGE=$((PAGE + 1))
+      return 0
+      ;;
+    prev)
+      [[ "$PAGE" -gt 1 ]] && PAGE=$((PAGE - 1))
+      return 0
+      ;;
+    show)
+      FILTER=""
+      PAGE=1
+      return 0
+      ;;
+    safe)
+      menu_all_safe
       return 0
       ;;
     all)
-      if [[ "$SCREEN" == "home" ]]; then
+      if [[ "$SCREEN" == "groups" ]]; then
         menu_all_safe
       else
         menu_select_all
@@ -1262,16 +1534,15 @@ menu_handle_word() {
       return 0
       ;;
     none)
-      [[ "$SCREEN" == "group" ]] || return 1
       : >"$MENU_DIR/selpaths"
       return 0
       ;;
     clean)
-      if [[ "$SCREEN" == "group" ]]; then
-        menu_clean_selected
+      if [[ "$SCREEN" == "groups" ]]; then
+        NOTE="Open a list first, or type safe."
         return 0
       fi
-      NOTE="Open a number first. all deletes every safe group."
+      menu_clean_selected
       return 0
       ;;
     *)
@@ -1285,9 +1556,13 @@ cmd_menu() {
   MENU_DIR="$(mktemp -d)"
   : >"$MENU_DIR/selpaths"
   SCREEN="home"
+  PAGE=1
+  FILTER=""
   while true; do
     if [[ "$SCREEN" == "home" ]]; then
       menu_draw_home
+    elif [[ "$SCREEN" == "groups" ]]; then
+      menu_draw_groups
     else
       menu_draw_group "$GROUP"
     fi
@@ -1302,6 +1577,16 @@ cmd_menu() {
     set -- $reply
     IFS="$oldifs"
     set +f
+    if [[ "$1" == "find" && $# -ge 2 ]]; then
+      FILTER="$2"
+      PAGE=1
+      continue
+    fi
+    if [[ "$1" == /* ]]; then
+      FILTER="${1#/}"
+      PAGE=1
+      continue
+    fi
     if [[ $# -eq 1 ]]; then
       if ! menu_handle_word "$1"; then
         NOTE="I do not know \"$1\". Type help."
@@ -1309,7 +1594,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find)
             NOTE="Type $word on its own line."
             ;;
           *)
@@ -1326,7 +1611,7 @@ usage() {
   cat <<EOF
 sweep ${VERSION} — a quiet disk cleaner for macOS
 
-  sweep                      open the menu
+  sweep                      biggest folders, tick with a number, then yes
   sweep scan                 print the lists and exit
   sweep items caches         show folders you can tick
   sweep clean caches --only NAME --yes
@@ -1334,8 +1619,8 @@ sweep ${VERSION} — a quiet disk cleaner for macOS
   sweep clean --yes          delete every safe group
   sweep large                biggest folders, look only
 
-In the menu, type a number, tick the folders, then type clean.
-Type the word yes when it asks. Anything else cancels.
+In the menu, the biggest folders are listed first.
+Type a number or a name to tick a line, then clean, then the word yes.
 
 Safe groups, included in "all" and "sweep clean --yes":
   caches homebrew dev xcode apps quicklook logs trash

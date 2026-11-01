@@ -28,15 +28,16 @@ make install
 
 ## The menu
 
-`sweep` opens a list. Type a number and press Return. That opens the folders inside it.
+`sweep` opens on the biggest folders, largest first, with plain names (Spotify, not a bundle id). A line marked `ask first` is a backup, a browser cache, or device files. `safe` means the app will rebuild it.
 
-- Type `1` or `1 3` to tick lines.
-- Type `all` to tick every line in that list.
-- Type `clean`, then type `yes` to delete the ticked lines.
-- Press Return, or type anything other than `yes`, to cancel.
-- Type `back` for the first list, and `quit` to leave.
-
-`all` on the first screen deletes the safe groups only, and only after you type `yes`. Backups, browsers, and device files are not in that set. Open them by number if you want them.
+- Type `1` or `1 3` to tick lines. Type `Spotify` to tick that line.
+- Type `more` for the next page, and `find music` to show only matching names.
+- Type `clean`, then type `yes`, to delete what you ticked.
+- Press Return instead of `yes` to cancel.
+- Type `caches`, `trash`, `dev`, or `backups` to open just that list.
+- Type `groups` for the short list of those names.
+- Type `safe`, then `yes`, to clear the usual caches and leave backups alone.
+- Type `quit` to leave.
 
 ## Commands
 

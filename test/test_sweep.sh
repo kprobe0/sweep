@@ -47,8 +47,17 @@ mkdir -p "$outside"
 printf 'safe' > "$outside/safe"
 ln -s "$outside" "$SWEEP_HOME/Library/Caches/evil"
 
+mkdir -p "$SWEEP_HOME/Library/Caches/zz.big" "$SWEEP_HOME/Library/Caches/com.spotify.client"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/zz.big/file" bs=1024 count=64 >/dev/null 2>&1
+printf 'song' > "$SWEEP_HOME/Library/Caches/com.spotify.client/file"
+
 items="$("$SWEEP" items caches)"
+printf '%s\n' "$items" | head -n 1 | grep -q 'zz.big' || fail 'largest folder was not listed first'
+printf '%s\n' "$items" | grep -q 'Spotify' || fail 'Spotify was not given a plain name'
 printf '%s\n' "$items" | grep -q 'com.example.app' || fail 'items missed a cache'
+"$SWEEP" clean --yes caches --only Spotify >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'Spotify cache survived --only'
+test -d "$SWEEP_HOME/Library/Caches/zz.big" || fail '--only Spotify removed another folder'
 printf '%s\n' "$items" | grep -q 'CloudKit' && fail 'CloudKit was offered for deletion' || true
 printf '%s\n' "$items" | grep -q 'com.apple.Safari' && fail 'browser cache was listed under caches' || true
 if "$SWEEP" clean --yes caches --only CloudKit >/dev/null 2>&1; then
@@ -94,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.2.0'
+"$SWEEP" --version | grep -q '0.3.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -131,5 +140,11 @@ test ! -e "$SWEEP_HOME/Library/Caches/drop.me" || fail 'a ticked folder survived
 "$SWEEP" clean --yes caches --only keep.me >/dev/null
 test ! -e "$SWEEP_HOME/Library/Caches/keep.me" || fail '--only left the named folder'
 test -f "$SWEEP_HOME/Documents/keep.txt" || fail 'a document was removed'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/com.spotify.client"
+printf 'song' > "$SWEEP_HOME/Library/Caches/com.spotify.client/file"
+printf '%s\n' Spotify clean yes quit | "$SWEEP" menu >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'ticking Spotify did not delete it'
+test -f "$SWEEP_HOME/Documents/keep.txt" || fail 'a document was removed from the menu'
 
 printf 'ok\n'
