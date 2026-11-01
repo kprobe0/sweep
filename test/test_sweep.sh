@@ -57,6 +57,11 @@ printf '%s\n' "$items" | grep -q 'Spotify' || fail 'Spotify was not given a plai
 printf '%s\n' "$items" | grep -q 'com.example.app' || fail 'items missed a cache'
 "$SWEEP" clean --yes caches --only Spotify >/dev/null
 test ! -e "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'Spotify cache survived --only'
+last="$("$SWEEP" last)"
+case "$last" in
+  *Spotify*) ;;
+  *) fail 'last did not remember Spotify' ;;
+esac
 test -d "$SWEEP_HOME/Library/Caches/zz.big" || fail '--only Spotify removed another folder'
 printf '%s\n' "$items" | grep -q 'CloudKit' && fail 'CloudKit was offered for deletion' || true
 printf '%s\n' "$items" | grep -q 'com.apple.Safari' && fail 'browser cache was listed under caches' || true
@@ -103,7 +108,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.8.0'
+"$SWEEP" --version | grep -q '0.9.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'

@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.8.0
+VERSION=0.9.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -554,7 +554,9 @@ hint_of() {
 }
 
 clean_group() {
-  local group="$1"
+  local group="$1" kb
+  kb="$(measure "$group")"
+  remember_removal "$kb" "$group"
   case "$group" in
     caches) clean_caches ;;
     homebrew)
@@ -1044,8 +1046,44 @@ delete_app_cache() {
   rm -rf "$path"
 }
 
+receipt_file() {
+  printf '%s\n' "$SWEEP_HOME/.local/share/sweep/removed.txt"
+}
+
+remember_removal() {
+  local kb="$1" name="$2" file
+  [[ "${kb:-0}" -gt 0 ]] || return 0
+  [[ -n "$name" ]] || return 0
+  file="$(receipt_file)"
+  mkdir -p "$(dirname "$file")"
+  printf '%s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(human "$kb")" "$name" >>"$file"
+}
+
+cmd_last() {
+  local file
+  file="$(receipt_file)"
+  if [[ ! -f "$file" ]]; then
+    printf 'Nothing has been removed yet.\n'
+    return 0
+  fi
+  printf 'Removed:\n'
+  tail -n 20 "$file"
+  printf '\n'
+}
+
 delete_item() {
-  local how="$1" path="$2" c
+  local how="$1" path="$2" c kb name
+  case "$how" in
+    simulators) ;;
+    docker) remember_removal "$(docker_kb)" "Docker unused data" ;;
+    *)
+      if [[ -e "$path" || -L "$path" ]]; then
+        kb="$(kb_of "$path")"
+        name="$(pretty_label "$(basename "$path")" "$path")"
+        remember_removal "$kb" "$name"
+      fi
+      ;;
+  esac
   case "$how" in
     path) remove_one "$(dirname "$path")" "$path" ;;
     app) delete_app_cache "$path" ;;
@@ -1345,6 +1383,8 @@ menu_draw_home() {
   caches   open one list, also: dev trash browsers backups
   more     next page                 find music   only matching names
   safe     delete the usual caches, after you type yes
+  info 1   show where line 1 lives
+  last     what sweep already removed
   quit     leave
 
 EOF
@@ -1711,6 +1751,48 @@ menu_walk() {
   fi
 }
 
+menu_pause() {
+  printf '  Press return to go back.\n  > '
+  IFS= read -r _ || exit 0
+}
+
+menu_info() {
+  local word="$1" n kb plain label path how group found base
+  found=0
+  [[ -f "$MENU_DIR/items" ]] || {
+    NOTE="Open the list first."
+    return 0
+  }
+  while IFS=$'\t' read -r n kb plain label path how group; do
+    base="$(basename "$path")"
+    if [[ "$word" == "$n" || "$(fold_case "$word")" == "$(fold_case "$plain")" || "$word" == "$label" || "$word" == "$base" ]]; then
+      found=1
+      printf '\n  %s%s%s\n' "$B" "$plain" "$Z"
+      printf '  %s, %s\n' "$(human "$kb")" "$(care_word "$group")"
+      printf '  %s\n' "$(why_item "$group")"
+      if [[ "$path" != "-" ]]; then
+        printf '  %s\n' "${path#"$SWEEP_HOME"/}"
+      fi
+      if app_is_open "$path"; then
+        printf '  This app is open.\n'
+      fi
+      printf '\n'
+      break
+    fi
+  done <"$MENU_DIR/items"
+  if [[ "$found" -eq 0 ]]; then
+    NOTE="No line named \"$word\"."
+    return 0
+  fi
+  menu_pause
+}
+
+menu_show_last() {
+  printf '\n'
+  cmd_last
+  menu_pause
+}
+
 menu_handle_word() {
   local word="$1"
   case "$word" in
@@ -1724,6 +1806,14 @@ menu_handle_word() {
       else
         SHOW_HELP=1
       fi
+      return 0
+      ;;
+    info)
+      NOTE="Type info and a number. Example: info 1"
+      return 0
+      ;;
+    last)
+      menu_show_last
       return 0
       ;;
     large)
@@ -1844,6 +1934,10 @@ cmd_menu() {
       PAGE=1
       continue
     fi
+    if [[ "$1" == "info" && $# -ge 2 ]]; then
+      menu_info "$2"
+      continue
+    fi
     if [[ $# -ge 2 && "$1" == "walk" && "$2" == "all" ]]; then
       menu_walk all
       continue
@@ -1860,7 +1954,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last)
             NOTE="Type $word on its own line."
             ;;
           *)
@@ -1907,7 +2001,7 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    scan|clean|large|help|menu|items)
+    scan|clean|large|help|menu|items|last)
       CMD="$1"
       ;;
     projects)
@@ -1960,6 +2054,7 @@ case "$CMD" in
     fi
     ;;
   menu) cmd_menu ;;
+  last) cmd_last ;;
   items) cmd_items ;;
   clean) cmd_clean ;;
   projects) cmd_projects ;;

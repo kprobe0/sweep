@@ -42,6 +42,7 @@ make install
 - Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`.
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
+- Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
 
 ## Commands
 
