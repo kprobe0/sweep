@@ -37,6 +37,7 @@ make install
 - Type `caches`, `trash`, `dev`, or `backups` to open just that list.
 - Type `groups` for the short list of those names.
 - Type `safe`, then `yes`, to clear the usual caches and leave backups alone.
+- Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `quit` to leave.
 
 ## Commands

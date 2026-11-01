@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.3.0
+VERSION=0.4.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -1233,14 +1233,12 @@ menu_draw_home() {
   fi
   cat <<EOF
 
+  walk     one folder at a time. yes deletes it, no keeps it
   1 3      tick those lines          Spotify   tick the line named Spotify
   clean    delete ticked lines, after you type yes
-  all      tick every line           none      untick every line
+  all      tick the safe lines       none      untick every line
   caches   open one list, also: dev trash browsers backups
-  groups   the short list of those names
   more     next page                 find music   only matching names
-  safe     delete the usual caches, after you type yes
-  large    biggest folders in Home, delete nothing
   quit     leave                     help      show this again
 
 EOF
@@ -1478,6 +1476,87 @@ menu_select_all() {
   done <"$MENU_DIR/items"
 }
 
+menu_select_safe() {
+  local n kb plain label path how group
+  : >"$MENU_DIR/selpaths"
+  while IFS=$'\t' read -r n kb plain label path how group; do
+    [[ -n "$path" ]] || continue
+    [[ "$(care_word "$group")" == "safe" ]] || continue
+    printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
+  done <"$MENU_DIR/items"
+}
+
+why_item() {
+  case "$1" in
+    caches) printf 'The app builds this again the next time you open it.' ;;
+    dev) printf 'The next install downloads this again.' ;;
+    trash) printf 'This is already in the Trash.' ;;
+    homebrew) printf 'Old Homebrew downloads. Brew can fetch them again.' ;;
+    xcode) printf 'Xcode rebuilds this the next time you compile.' ;;
+    apps) printf 'The app builds this cache again.' ;;
+    logs) printf 'Old log files. Crash reports are not in this list.' ;;
+    quicklook) printf 'Finder thumbnail pictures. Finder makes them again.' ;;
+    browsers) printf 'The browser reloads these pages. Cookies stay.' ;;
+    backups) printf 'This is a device backup. Deleting it cannot be undone.' ;;
+    devices) printf 'Rebuilt the next time you plug that device in.' ;;
+    archives) printf 'An old Xcode export. This exact file will not come back.' ;;
+    projects) printf 'Build files. The next build creates them again.' ;;
+    docker) printf 'Docker data no container is using.' ;;
+    *) printf 'Sweep can remove this.' ;;
+  esac
+}
+
+menu_walk() {
+  local scope="$1" kb plain label path how group answer freed n capped
+  ensure_catalog
+  freed=0
+  n=0
+  capped=0
+  while IFS=$'\t' read -r kb plain label path how group <&4; do
+    [[ -n "$path" ]] || continue
+    if [[ "$scope" != "all" && "$(care_word "$group")" != "safe" ]]; then
+      continue
+    fi
+    if [[ "$n" -ge 12 ]]; then
+      capped=1
+      break
+    fi
+    n=$((n + 1))
+    menu_blank
+    print_disk
+    printf '\n  %s%s%s\n' "$B" "$plain" "$Z"
+    printf '  %s\n' "$(human "$kb")"
+    printf '  %s\n\n' "$(why_item "$group")"
+    printf '  yes    delete it\n'
+    printf '  no     keep it and show the next one\n'
+    printf '  quit   stop here\n'
+    printf '  > '
+    IFS= read -r answer || exit 0
+    answer="${answer//$'\r'/}"
+    case "$answer" in
+      yes)
+        delete_item "$how" "$path"
+        freed=$((freed + kb))
+        ;;
+      quit|q|exit)
+        break
+        ;;
+    esac
+  done 4<"$MENU_DIR/catalog"
+  forget_catalog
+  SCREEN="home"
+  PAGE=1
+  if [[ "$n" -eq 0 ]]; then
+    NOTE="Nothing safe to walk through."
+  elif [[ "$freed" -gt 0 && "$capped" -eq 1 ]]; then
+    NOTE="Freed about $(human "$freed"). Type walk for the next folders."
+  elif [[ "$freed" -gt 0 ]]; then
+    NOTE="Freed about $(human "$freed")."
+  else
+    NOTE="Nothing was deleted."
+  fi
+}
+
 menu_handle_word() {
   local word="$1"
   case "$word" in
@@ -1525,8 +1604,14 @@ menu_handle_word() {
       menu_all_safe
       return 0
       ;;
+    walk)
+      menu_walk safe
+      return 0
+      ;;
     all)
-      if [[ "$SCREEN" == "groups" ]]; then
+      if [[ "$SCREEN" == "home" ]]; then
+        menu_select_safe
+      elif [[ "$SCREEN" == "groups" ]]; then
         menu_all_safe
       else
         menu_select_all
@@ -1582,6 +1667,10 @@ cmd_menu() {
       PAGE=1
       continue
     fi
+    if [[ $# -ge 2 && "$1" == "walk" && "$2" == "all" ]]; then
+      menu_walk all
+      continue
+    fi
     if [[ "$1" == /* ]]; then
       FILTER="${1#/}"
       PAGE=1
@@ -1594,7 +1683,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk)
             NOTE="Type $word on its own line."
             ;;
           *)
@@ -1619,8 +1708,8 @@ sweep ${VERSION} — a quiet disk cleaner for macOS
   sweep clean --yes          delete every safe group
   sweep large                biggest folders, look only
 
-In the menu, the biggest folders are listed first.
-Type a number or a name to tick a line, then clean, then the word yes.
+In the menu, type walk to answer yes or no for one folder at a time.
+Or tick lines with a number or a name, then clean, then the word yes.
 
 Safe groups, included in "all" and "sweep clean --yes":
   caches homebrew dev xcode apps quicklook logs trash

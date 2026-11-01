@@ -103,7 +103,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.3.0'
+"$SWEEP" --version | grep -q '0.4.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -146,5 +146,15 @@ printf 'song' > "$SWEEP_HOME/Library/Caches/com.spotify.client/file"
 printf '%s\n' Spotify clean yes quit | "$SWEEP" menu >/dev/null
 test ! -e "$SWEEP_HOME/Library/Caches/com.spotify.client" || fail 'ticking Spotify did not delete it'
 test -f "$SWEEP_HOME/Documents/keep.txt" || fail 'a document was removed from the menu'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/walk.big" "$SWEEP_HOME/Library/Caches/walk.small"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/walk.big/file" bs=1024 count=80 >/dev/null 2>&1
+printf 'small' > "$SWEEP_HOME/Library/Caches/walk.small/file"
+printf '%s\n' walk no quit | "$SWEEP" menu >/dev/null
+test -f "$SWEEP_HOME/Library/Caches/walk.big/file" || fail 'no during a walk deleted the folder'
+printf '%s\n' walk yes quit | "$SWEEP" menu >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/walk.big" || fail 'yes during a walk left the folder'
+test -f "$SWEEP_HOME/Library/Caches/walk.small/file" || fail 'walk deleted the next folder after quit'
+test -f "$SWEEP_HOME/Documents/keep.txt" || fail 'a document was removed during a walk'
 
 printf 'ok\n'
