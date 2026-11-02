@@ -4,9 +4,9 @@
 set -euo pipefail
 
 dest="${PREFIX:-$HOME/.local/bin}"
-release_version="0.15.0"
+release_version="0.16.0"
 url="https://raw.githubusercontent.com/kprobe0/sweep/v${release_version}/sweep"
-expected_sha="5499a3e5da9da7555f97f063cdb5f3d320790452cfcdee346dfd25cbd79cf86c"
+expected_sha="62df62f51fd98e6219808ef9a793b84eebe5a2af3cb375053bddf24085ae021b"
 
 mkdir -p "$dest"
 

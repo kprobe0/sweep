@@ -1,8 +1,8 @@
 class Sweep < Formula
   desc "Quiet disk cleaner for macOS"
   homepage "https://github.com/kprobe0/sweep"
-  url "https://github.com/kprobe0/sweep/archive/refs/tags/v0.15.0.tar.gz"
-  sha256 "ac80cc5ec658dd482bdeef48ce7686ba28a6fb7843ac5f46e1786e9a3ace4fae"
+  url "https://github.com/kprobe0/sweep/archive/refs/tags/v0.16.0.tar.gz"
+  sha256 "794a0377398ec691273c7280616cde2ab2898e356931576ac4893c0bb585ce4f"
   license "MIT"
   head "https://github.com/kprobe0/sweep.git", branch: "main"
 
