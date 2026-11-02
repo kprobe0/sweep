@@ -15,7 +15,7 @@ brew tap kprobe0/sweep https://github.com/kprobe0/sweep
 brew install kprobe0/sweep/sweep
 ```
 
-That installs the [0.16.0 archive](https://github.com/kprobe0/sweep/archive/refs/tags/v0.16.0.tar.gz). Its SHA-256 is `794a0377398ec691273c7280616cde2ab2898e356931576ac4893c0bb585ce4f`.
+That installs the [0.17.0 archive](https://github.com/kprobe0/sweep/archive/refs/tags/v0.17.0.tar.gz). Its SHA-256 is `7702313379997523127865f32498a8578d20c0d723bec464b1d625e4cd424243`.
 
 Or paste this and press Return:
 
@@ -23,7 +23,7 @@ Or paste this and press Return:
 curl -fsSL https://raw.githubusercontent.com/kprobe0/sweep/main/install.sh | bash
 ```
 
-That downloads the tagged 0.16.0 script and stops if its SHA-256 is not `62df62f51fd98e6219808ef9a793b84eebe5a2af3cb375053bddf24085ae021b`.
+That downloads the tagged 0.17.0 script and stops if its SHA-256 is not `a5025b80e0ba6c85a28e05559b79f74bde12497761a447a6fa5ebb5973506c33`.
 
 If it says to add a PATH line, paste that too. Then type:
 
