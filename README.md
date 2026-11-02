@@ -50,7 +50,8 @@ make install
 - Type `caches`, `trash`, `dev`, or `backups` to open just that list.
 - Type `groups` for the short list of those names.
 - Type `safe`, then `yes`, to clear the usual caches and leave backups alone.
-- Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`. `go` leaves a folder alone when its app is still open.
+- Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`. `go` leaves a folder alone when its app is still open, and it names the `stays` lines it did not touch.
+- Type `walk stays` to answer yes or no for backups, installers, and leftovers.
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
@@ -88,13 +89,16 @@ These stay put unless you name them:
 | `simulators` | Simulators whose runtime is no longer installed, listed by name. Cleaning them removes every unavailable simulator |
 | `docker` | Stopped containers, dangling images, unused networks |
 | `backups` | One line per iPhone or iPad backup, with the device and the date. This cannot be undone |
-| `downloads` | Disk images and installer archives: `.dmg`, `.pkg`, `.mpkg`, `.iso`, `.zip` |
+| `downloads` | Disk images and installers: `.dmg`, `.pkg`, `.mpkg`, `.iso`, and a `.zip` whose name looks like an installer |
+| `files` | Other files in Downloads. Unticked, and not part of `go` |
 | `partial` | Unfinished downloads, `.download` and `.crdownload` |
 | `projects` | `node_modules` next to a `package.json`, Cargo `target`, Swift `.build`, `__pycache__` |
 
 CloudKit, HomeKit, and Family Sharing caches are left alone. Documents, Desktop, Photos, Music, Movies, Mail, Messages, Preferences, and `~/.ssh` are never deleted. Crash reports in DiagnosticReports are kept.
 
 Quit a browser before `sweep clean browsers --yes`. That clears the page cache. Cookies live somewhere else and stay put.
+
+The free-space line names purgeable space when Disk Utility reports it. sweep does not purge it. A local Time Machine snapshot is named and is not deleted.
 
 Set `NO_COLOR` to any non-empty value for plain text. `man sweep` describes the same rules after the manual page is installed. The release steps are in `RELEASE.md`.
 

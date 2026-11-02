@@ -12,7 +12,9 @@ mkdir -p "$dest"
 
 source_dir=""
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-  source_dir="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+  source_dir="$(dirname "${BASH_SOURCE[0]}")"
+  got_dir="$(unset CDPATH; cd -- "$source_dir" 2>/dev/null && pwd)" || got_dir=""
+  source_dir="$got_dir"
 fi
 
 if [[ -n "$source_dir" && -f "$source_dir/sweep" ]]; then
@@ -33,5 +35,5 @@ fi
 printf 'Installed %s\n' "$dest/sweep"
 case ":$PATH:" in
   *":$dest:"*) ;;
-  *) printf 'Add it to your PATH:\n  export PATH="%s:$PATH"\n' "$dest" ;;
+  *) printf "Add it to your PATH:\n  export PATH=\"%s:\$PATH\"\n" "$dest" ;;
 esac

@@ -5,7 +5,7 @@ commands=(
 )
 groups=(
   caches homebrew dev xcode apps quicklook logs trash
-  browsers archives devices simulators docker backups downloads partial
+  browsers archives devices simulators docker backups downloads partial files
 )
 flags=(
   --yes --only --leftovers --empty --dry-run --version --help
