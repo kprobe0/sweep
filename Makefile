@@ -1,6 +1,6 @@
 PREFIX ?= $(HOME)/.local
 
-.PHONY: install test
+.PHONY: install test lint
 
 install:
 	mkdir -p $(PREFIX)/bin
@@ -8,3 +8,6 @@ install:
 
 test:
 	bash test/test_sweep.sh
+
+lint:
+	shellcheck -s bash sweep install.sh

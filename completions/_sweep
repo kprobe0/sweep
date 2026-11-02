@@ -1,0 +1,15 @@
+#compdef sweep
+local -a commands groups flags
+commands=(
+  scan clean large help menu items last login uninstall orphans projects
+)
+groups=(
+  caches homebrew dev xcode apps quicklook logs trash
+  browsers archives devices simulators docker backups downloads partial
+)
+flags=(
+  --yes --only --leftovers --empty --dry-run --version --help
+)
+_arguments \
+  '1:command:($commands $groups $flags)' \
+  '*:argument:($groups all remove --yes --leftovers --empty)'

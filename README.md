@@ -54,9 +54,11 @@ make install
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.
-- Type `downloads` for installer files, `login` for helpers whose program is already gone, and `uninstall Name` to preview one app. The preview shows the team id, any package receipt, and shared folders such as a group container. Shared folders are shown and never deleted. The app goes to the Trash only after `--yes`. Exact leftovers stay unless you pass `--leftovers`.
-- A folder left behind by an app appears on the first list after it has sat unused for 30 days. It is marked `stays` and it is not ticked. `go` leaves it. `orphans` lists the same folders.
-- `sweep last` records the date, the size, the name, and the path.
+- Type `uninstall` for a numbered list of apps. The preview shows the team id, any package receipt, a container note, the preference file, and shared folders. Shared folders and the preference file are shown and never deleted. Type `yes` and the app moves to the Trash. Leftovers stay unticked.
+- Type `login` for helpers whose program is already gone. A helper that still exists is not on the list. Nothing is selected.
+- A folder left behind by an app appears on the first list after it has sat unused for 30 days, marked `stays`, unticked. A cache whose app is gone is also `stays`, and `go` leaves it. `go` still clears caches of apps that are installed.
+- Type `info 1` for the path. On a leftover it also shows the bundle id, how many days it has been unused, and that no installed app owns it.
+- `sweep last` records the date, the size, the name, and the path. `sweep last all` prints the whole receipt.
 - `go` and `clean` delete for good. They do not move those folders to the Trash.
 
 ## Commands
@@ -70,9 +72,11 @@ sweep large
 sweep orphans
 sweep orphans remove com.example.oldapp --yes
 sweep uninstall Name
+sweep last all
+sweep clean homebrew --empty --yes
 ```
 
-`sweep clean --yes` covers caches the system or the tool will rebuild: user caches, Homebrew, npm and the other dev caches, Xcode DerivedData, a few app caches, old logs, Quick Look thumbnails, and the Trash.
+`sweep clean --yes` covers caches the system or the tool will rebuild: user caches whose app is still installed, Homebrew downloads older than 120 days, npm and the other dev caches, Xcode DerivedData, a few app caches, old logs, Quick Look thumbnails, and the Trash. `sweep clean homebrew --empty --yes` clears the rest of the Homebrew cache.
 
 These stay put unless you name them:
 
@@ -81,14 +85,18 @@ These stay put unless you name them:
 | `browsers` | Safari, Chrome, Firefox, Brave, Arc, Edge, Opera caches |
 | `archives` | Xcode archives |
 | `devices` | iOS, watch, tv, and vision device-support files |
-| `simulators` | Simulators whose runtime is no longer installed |
+| `simulators` | Simulators whose runtime is no longer installed, listed by name. Cleaning them removes every unavailable simulator |
 | `docker` | Stopped containers, dangling images, unused networks |
-| `backups` | iPhone and iPad backups. This cannot be undone |
+| `backups` | One line per iPhone or iPad backup, with the device and the date. This cannot be undone |
+| `downloads` | Disk images and installer archives: `.dmg`, `.pkg`, `.mpkg`, `.iso`, `.zip` |
+| `partial` | Unfinished downloads, `.download` and `.crdownload` |
 | `projects` | `node_modules` next to a `package.json`, Cargo `target`, Swift `.build`, `__pycache__` |
 
 CloudKit, HomeKit, and Family Sharing caches are left alone. Documents, Desktop, Photos, Music, Movies, Mail, Messages, Preferences, and `~/.ssh` are never deleted. Crash reports in DiagnosticReports are kept.
 
 Quit a browser before `sweep clean browsers --yes`. That clears the page cache. Cookies live somewhere else and stay put.
+
+Set `NO_COLOR` to any non-empty value for plain text. `man sweep` describes the same rules after the manual page is installed. The release steps are in `RELEASE.md`.
 
 ## Why the first run can sit there
 

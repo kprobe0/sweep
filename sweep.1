@@ -1,0 +1,99 @@
+.TH SWEEP 1
+.SH NAME
+sweep \- a quiet disk cleaner for macOS
+.SH SYNOPSIS
+.B sweep
+.br
+.B sweep scan
+.br
+.B sweep items
+.I group
+.br
+.B sweep clean
+.RI [ group ]
+.B --yes
+.br
+.B sweep clean homebrew --empty --yes
+.br
+.B sweep uninstall
+.I Name
+.RB [ --yes ]
+.RB [ --leftovers ]
+.br
+.B sweep orphans
+.RB [ "remove ID --yes" ]
+.br
+.B sweep login
+.RB [ "remove FILE --yes" ]
+.br
+.B sweep last
+.RB [ all ]
+.SH DESCRIPTION
+sweep lists the largest folders it is willing to touch and waits.
+Nothing is deleted until you type
+.B yes
+or pass
+.BR --yes .
+.PP
+.B rebuilds
+means the app or tool creates that folder again.
+.B stays
+means the space stays gone.
+.B go
+removes the safe folders on the list and skips a folder whose app is still open.
+A cache whose app is gone is marked
+.B stays
+and is left out of
+.BR go .
+A leftover unused for 30 days is marked
+.B stays
+and is not ticked.
+.PP
+.B go
+and
+.B clean
+delete for good.
+They do not move those folders to the Trash.
+.B uninstall
+moves one app to the Trash.
+Leftovers stay unticked unless you pass
+.BR --leftovers .
+A preference file is shown and is not deleted.
+A shared folder, including a vendor folder such as Adobe, is shown and is never a delete list.
+.PP
+In the menu, type
+.B uninstall
+or
+.B login
+for a numbered list.
+Nothing on those lists is selected until you type a number and then
+.BR yes .
+.SH FOLDERS NEVER ENTERED
+Documents, Desktop, Pictures, Movies, Music, Mail, Messages, Preferences, and
+.IR ~/.ssh .
+CloudKit, HomeKit, and Family Sharing caches are left alone.
+Crash reports in DiagnosticReports are kept.
+Cookies are not wiped.
+.PP
+Homebrew downloads older than 120 days are the normal Homebrew clean.
+.B "sweep clean homebrew --empty --yes"
+empties the rest of that cache.
+.SH FILES
+.TP
+.I ~/.local/share/sweep/removed.txt
+The removal receipt.
+.B sweep last
+prints the latest lines.
+.B sweep last all
+prints the whole file.
+Each line has the date, the size, the name, and the path.
+.SH ENVIRONMENT
+.TP
+.B NO_COLOR
+When set to any non-empty value, sweep prints plain text.
+.TP
+.B SWEEP_LOG_DAYS
+Log files older than this many days are eligible. The default is 7.
+.SH SEE ALSO
+The menu in the README, and
+.IR RELEASE.md .
