@@ -53,12 +53,35 @@ and is left out of
 A leftover unused for 30 days is marked
 .B stays
 and is not ticked.
+The first list also shows installed apps of about 100 MB or more.
+Ticking one moves that app to the Trash.
+.B "sweep uninstall"
+lists every app, including the smaller ones.
+.B "sweep uninstall restore Name"
+puts the app back in the folder it came from.
+Emptying the Trash from
+.B go
+or
+.B clean
+leaves an app that is sitting in the Trash.
+Tick that app if you want it deleted for good.
 .PP
 .B go
 and
 .B clean
-delete for good.
+delete caches and other safe folders for good.
 They do not move those folders to the Trash.
+An app that is still open, or a second copy with the same bundle id, stays where it is and the menu stays open.
+.B walk
+prints the path under the name.
+.B yes
+moves an app to the Trash and deletes a backup for good.
+The only backup of a device, and the only support folder for a system version, ask you to type that name before they are deleted.
+A device-support folder does not boot the Mac.
+.B info
+on an app shows the bundle id, the team id, and the folder a restore would use.
+A simulator line says the size is unknown.
+.PP
 .B uninstall
 moves one app to the Trash.
 Leftovers stay unticked unless you pass
@@ -86,11 +109,18 @@ empties the rest of that cache.
 .SH FILES
 .TP
 .I ~/.local/share/sweep/removed.txt
-The removal receipt.
+Removals that are not caches.
+.TP
+.I ~/.local/share/sweep/removed-caches.txt
+Cache removals.
+.TP
+.I ~/.local/share/sweep/removed-homebrew.txt
+Homebrew removals. A long cache wipe does not push this list out.
+.PP
 .B sweep last
-prints the latest lines.
+prints the latest lines of each file that exists.
 .B sweep last all
-prints the whole file.
+prints the whole of each.
 Each line has the date, the size, the name, and the path.
 .SH ENVIRONMENT
 .TP

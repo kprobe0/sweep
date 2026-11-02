@@ -51,8 +51,8 @@ make install
 - Type `groups` for the short list of those names.
 - Type `safe`, then `yes`, to clear the usual caches and leave backups alone.
 - Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`. `go` leaves a folder alone when its app is still open, and it names every `stays` line it did not touch, including ones on later pages.
-- An installed app is on that list too, unticked. Ticking it moves the app to the Trash. `sweep uninstall restore Name` puts it back in the folder it came from, including a timestamped Trash name.
-- Type `walk stays` to answer yes or no for backups, installers, and leftovers.
+- An installed app of about 100 MB or more is on that list too, unticked. Smaller apps stay on `sweep uninstall`. Ticking an app moves it to the Trash. `sweep uninstall restore Name` puts it back in the folder it came from, including a timestamped Trash name. Emptying the Trash leaves an app that is already in the Trash.
+- Type `walk stays` to answer yes or no for backups, installers, and leftovers. The path is under the name. `yes` moves an app to the Trash and deletes a backup for good. The only backup of a device asks you to type that device's name.
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
 - Type `help` if you want the rest of the commands, and `quit` to leave.
 - Type `info 1` to see the real folder for a line. Type `last` to see what was already removed.

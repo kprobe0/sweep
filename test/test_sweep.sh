@@ -114,7 +114,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.16.0'
+"$SWEEP" --version | grep -q '0.17.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -504,8 +504,11 @@ cat > "$tmp/sims.txt" <<'EOF'
 EOF
 sims="$(SWEEP_SIM_LIST="$tmp/sims.txt" "$SWEEP" items simulators)"
 case "$sims" in
-  *'iPhone 15'*) ;;
-  *) fail 'an unavailable simulator was not named' ;;
+  *'unknown'*'iPhone 15'*) ;;
+  *) fail 'an unavailable simulator was not named with an unknown size' ;;
+esac
+case "$sims" in
+  *'1.0 MB'*) fail 'a simulator was shown as 1.0 MB' ;;
 esac
 case "$sims" in
   *'iPad Air'*) fail 'a shutdown simulator was treated as unavailable' ;;
@@ -525,6 +528,13 @@ mkdir -p "$SWEEP_HOME/Library/Developer/Xcode/Archives/OldExport.xcarchive"
 printf 'old' > "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldApp/file"
 printf 'new' > "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/NewApp/file"
 printf 'arc' > "$SWEEP_HOME/Library/Developer/Xcode/Archives/OldExport.xcarchive/file"
+mkdir -p "$SWEEP_HOME/Library/Developer/Xcode/Archives/2024-05-01.xcarchive"
+python3 - <<PY
+import plistlib
+p="$SWEEP_HOME/Library/Developer/Xcode/Archives/2024-05-01.xcarchive/Info.plist"
+plistlib.dump({"Name":"DatedApp"}, open(p,"wb"))
+PY
+printf 'arc' > "$SWEEP_HOME/Library/Developer/Xcode/Archives/2024-05-01.xcarchive/file"
 touch -t 202001010000 "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldApp" \
   "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldApp/file"
 xcode_items="$("$SWEEP" items xcode)"
@@ -536,6 +546,10 @@ archive_items="$("$SWEEP" items archives)"
 case "$archive_items" in
   *'OldExport.xcarchive,'*) ;;
   *) fail 'an archive was shown without a date' ;;
+esac
+case "$archive_items" in
+  *'DatedApp,'*) ;;
+  *) fail 'a date-named archive hid the app name' ;;
 esac
 "$SWEEP" clean --yes xcode >/dev/null
 test ! -e "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldApp" || fail 'an old DerivedData project survived'
@@ -614,6 +628,10 @@ case "$btm_out" in
   *'shown only'*) ;;
   *) fail 'a non-plist login item looked removable' ;;
 esac
+case "$btm_out" in
+  *'Nothing below can be removed'*) ;;
+  *) fail 'login items looked like one deletable list' ;;
+esac
 
 SWEEP_SIM_LIST="$tmp/sims.txt" "$SWEEP" clean simulators --only "iPhone 15" --yes >/dev/null
 case "$(cat "$SWEEP_HOME/sim.deleted")" in
@@ -624,10 +642,14 @@ esac
 mkdir -p "$SWEEP_HOME/Library/Caches/trim.me"
 printf 't' > "$SWEEP_HOME/Library/Caches/trim.me/file"
 SWEEP_RECEIPT_KEEP=2 "$SWEEP" clean caches --only trim.me --yes >/dev/null
-kept="$(wc -l < "$SWEEP_HOME/.local/share/sweep/removed.txt" | tr -d ' ')"
+kept="$(wc -l < "$SWEEP_HOME/.local/share/sweep/removed-caches.txt" | tr -d ' ')"
 if [[ "$kept" -gt 2 ]]; then
   fail "the receipt kept $kept lines"
 fi
+case "$("$SWEEP" last)" in
+  *'Homebrew downloads'*) ;;
+  *) fail 'a cache wipe pushed the Homebrew receipt off the list' ;;
+esac
 
 mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone"
 python3 - <<PY
@@ -649,6 +671,26 @@ case "$devices" in
   *'only copy of this version'*) ;;
   *) fail 'the only device-support folder was not marked' ;;
 esac
+case "$devices" in
+  *'does not boot'*) ;;
+  *) fail 'device support hid that the Mac does not boot from it' ;;
+esac
+backup_menu="$(printf 'backups\n1\nclean\nyes\nOnlyPhone\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$backup_menu" in
+  *'Type the device name'*) ;;
+  *) fail 'the only backup did not ask for the device name' ;;
+esac
+case "$backup_menu" in
+  *'Bye'*) ;;
+  *) fail 'a backup confirm left the menu' ;;
+esac
+test ! -d "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone" || fail 'a confirmed backup was kept'
+device_menu="$(printf 'devices\n1\nclean\nyes\n21E213\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$device_menu" in
+  *'Type the system version'*) ;;
+  *) fail 'the only device-support folder did not ask for the version' ;;
+esac
+test ! -d "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)" || fail 'a confirmed device-support folder was kept'
 
 mkdir -p "$SWEEP_HOME/Downloads/OldInstallers"
 printf 'i' > "$SWEEP_HOME/Downloads/OldInstallers/setup.dmg"
@@ -695,6 +737,32 @@ case "$app_list" in
   *Stamp*stays*) ;;
   *) fail 'an installed app was missing from the first list' ;;
 esac
+case "$app_list" in
+  *'still measuring'*) ;;
+  *) fail 'the first screen waited for every group' ;;
+esac
+info_app="$(printf 'info Stamp\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$info_app" in
+  *com.example.stamp*) ;;
+  *) fail 'info hid the app bundle id' ;;
+esac
+case "$info_app" in
+  *'Team none'*) ;;
+  *) fail 'info hid the team id' ;;
+esac
+case "$info_app" in
+  *'Restores to'*) ;;
+  *) fail 'info hid the restore folder' ;;
+esac
+walk_app="$(printf 'walk stays\nno\nno\nno\nno\nno\nno\nno\nno\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$walk_app" in
+  *'move it to the Trash'*) ;;
+  *) fail 'walk did not say an app goes to the Trash' ;;
+esac
+case "$walk_app" in
+  *'delete it for good'*) ;;
+  *) fail 'walk did not say a backup or leftover is deleted for good' ;;
+esac
 printf 'Stamp\nclean\nyes\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
 test -d "$SWEEP_HOME/.Trash/Stamp.app" || fail 'ticking an app did not move it to the Trash'
 test ! -d "$SWEEP_HOME/Applications/Stamp.app" || fail 'ticking an app deleted it in place'
@@ -704,6 +772,108 @@ case "$page_out" in
   *'Page 2'*) ;;
   *) fail 'uninstall returned to the first page' ;;
 esac
+
+printf 'loose' > "$SWEEP_HOME/.Trash/loose.txt"
+"$SWEEP" clean --yes trash >/dev/null
+test -d "$SWEEP_HOME/.Trash/Stamp.app" || fail 'emptying the Trash deleted an app'
+test ! -e "$SWEEP_HOME/.Trash/loose.txt" || fail 'a loose Trash file survived'
+
+mkdir -p "$SWEEP_HOME/Applications/Tiny.app/Contents"
+cat > "$SWEEP_HOME/Applications/Tiny.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.tiny</string>
+</dict></plist>
+EOF
+tiny_menu="$(printf 'quit\n' | SWEEP_APP_MIN_KB=102400 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$tiny_menu" in
+  *Tiny*) fail 'a small app was on the first list' ;;
+esac
+case "$("$SWEEP" uninstall)" in
+  *Tiny*) ;;
+  *) fail 'uninstall hid a small app' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/Applications/OpenMe.app/Contents"
+cat > "$SWEEP_HOME/Applications/OpenMe.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.openme</string>
+  <key>CFBundleExecutable</key><string>OpenBin</string>
+</dict></plist>
+EOF
+cat > "$bindir/pgrep" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-x" && "$2" == "OpenBin" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$bindir/pgrep"
+open_menu="$(printf 'OpenMe\nclean\nyes\nquit\n' | PATH="$bindir:$PATH" "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$open_menu" in
+  *'is open'*) ;;
+  *) fail 'an open app was moved without a warning' ;;
+esac
+case "$open_menu" in
+  *'Bye'*) ;;
+  *) fail 'refusing an open app left the menu' ;;
+esac
+test -d "$SWEEP_HOME/Applications/OpenMe.app" || fail 'an open app was moved to the Trash'
+
+mkdir -p "$SWEEP_HOME/Applications/Two.app/Contents" "$SWEEP_HOME/Applications/TwoCopy.app/Contents"
+cat > "$SWEEP_HOME/Applications/Two.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.two</string>
+</dict></plist>
+EOF
+cp "$SWEEP_HOME/Applications/Two.app/Contents/Info.plist" "$SWEEP_HOME/Applications/TwoCopy.app/Contents/Info.plist"
+copy_menu="$(printf 'Two\nclean\nyes\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$copy_menu" in
+  *'Another copy'*) ;;
+  *) fail 'a second copy was moved without a warning' ;;
+esac
+case "$copy_menu" in
+  *'Bye'*) ;;
+  *) fail 'refusing a second copy left the menu' ;;
+esac
+test -d "$SWEEP_HOME/Applications/Two.app" || fail 'a second copy was moved to the Trash'
+
+i=1
+while [[ "$i" -le 5 ]]; do
+  dd if=/dev/zero of="$SWEEP_HOME/Downloads/stay$i.bin" bs=1024 count=3072 >/dev/null 2>&1
+  i=$((i + 1))
+done
+stay_note="$(printf 'go\nyes\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$stay_note" in
+  *', and '*more*) ;;
+  *) fail 'go hid the rest of the stays list' ;;
+esac
+
+if cp -c "$SWEEP_HOME/Downloads/notes.txt" "$SWEEP_HOME/Downloads/notes-copy.txt" 2>/dev/null; then
+  "$SWEEP" clean --yes files >/dev/null 2>"$tmp/clone.err" || true
+  test -f "$SWEEP_HOME/Downloads/notes.txt" || fail 'an APFS clone was removed'
+  test -f "$SWEEP_HOME/Downloads/notes-copy.txt" || fail 'an APFS clone copy was removed'
+  case "$(cat "$tmp/clone.err")" in
+    *notes.txt*|*notes-copy.txt*|*'cannot see which copy'*) ;;
+    *) fail 'an APFS clone was skipped without naming a copy' ;;
+  esac
+fi
+
+sparse="$SWEEP_HOME/Downloads/sparse.bin"
+dd if=/dev/zero of="$sparse" bs=1 count=1 seek=10485760 >/dev/null 2>&1 || true
+if [[ -f "$sparse" ]]; then
+  logical="$(stat -f %z "$sparse")"
+  allocated="$(du -sk "$sparse" | awk '{print $1}')"
+  if [[ "${logical:-0}" -gt $((allocated * 1024 * 4)) ]]; then
+    sparse_info="$(printf 'files\ninfo sparse.bin\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+    case "$sparse_info" in
+      *'On disk'*'claims'*) ;;
+      *) fail 'info hid a file that claims more than it uses' ;;
+    esac
+  fi
+fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -s bash "$ROOT/sweep" "$ROOT/install.sh"
