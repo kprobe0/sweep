@@ -1,5 +1,10 @@
 #compdef sweep
-local -a commands groups flags
+local -a commands groups flags apps
+if (( CURRENT > 1 )) && [[ ${words[2]} == uninstall || ${words[2]} == restore ]]; then
+  apps=(${(f)"$(sweep uninstall 2>/dev/null | awk '/^  [^ ]/ && $2 == "" { print $1 }')"})
+  _describe 'app' apps
+  return
+fi
 commands=(
   scan clean large help menu items last login uninstall orphans projects
 )
@@ -12,4 +17,4 @@ flags=(
 )
 _arguments \
   '1:command:($commands $groups $flags)' \
-  '*:argument:($groups all remove --yes --leftovers --empty)'
+  '*:argument:($groups all remove restore stays --yes --leftovers --empty)'

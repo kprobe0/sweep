@@ -114,7 +114,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.15.0'
+"$SWEEP" --version | grep -q '0.16.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -123,8 +123,10 @@ fi
 bindir="$tmp/bin"
 mkdir -p "$bindir" "$SWEEP_HOME/Library/Caches/Homebrew"
 printf 'pkg' > "$SWEEP_HOME/Library/Caches/Homebrew/pkg"
-printf 'old' > "$SWEEP_HOME/Library/Caches/Homebrew/old.tar.gz"
-touch -t 202001010000 "$SWEEP_HOME/Library/Caches/Homebrew/old.tar.gz"
+printf 'old' > "$SWEEP_HOME/Library/Caches/Homebrew/aaaaaaaa--wget--1.0.tar.gz"
+printf 'new' > "$SWEEP_HOME/Library/Caches/Homebrew/bbbbbbbb--wget--1.2.tar.gz"
+touch -t 201901010000 "$SWEEP_HOME/Library/Caches/Homebrew/aaaaaaaa--wget--1.0.tar.gz"
+touch -t 202001010000 "$SWEEP_HOME/Library/Caches/Homebrew/bbbbbbbb--wget--1.2.tar.gz"
 cat > "$bindir/brew" <<'EOF'
 #!/bin/bash
 if [[ "$1" == "--cache" ]]; then
@@ -140,20 +142,19 @@ EOF
 chmod +x "$bindir/brew"
 brew_items="$(PATH="$bindir:$PATH" "$SWEEP" items homebrew)"
 case "$brew_items" in
-  *old.tar.gz*) ;;
-  *) fail 'an old Homebrew download was not listed' ;;
+  *wget--1.0.tar.gz*) ;;
+  *) fail 'an older Homebrew download was not listed' ;;
+esac
+case "$brew_items" in
+  *wget--1.2.tar.gz*) fail 'the newest Homebrew download for a formula was listed' ;;
 esac
 case "$brew_items" in
   *pkg*) fail 'a fresh Homebrew download was listed' ;;
 esac
 PATH="$bindir:$PATH" "$SWEEP" clean --yes homebrew >/dev/null
-test -s "$SWEEP_HOME/brew.called" || fail 'brew cleanup was not used'
-case "$(cat "$SWEEP_HOME/brew.called")" in
-  *--prune=120*) ;;
-  *) fail 'brew cleanup did not use 120 days' ;;
-esac
 test -f "$SWEEP_HOME/Library/Caches/Homebrew/pkg" || fail 'a fresh Homebrew download was removed'
-test ! -e "$SWEEP_HOME/Library/Caches/Homebrew/old.tar.gz" || fail 'an old Homebrew download survived'
+test -f "$SWEEP_HOME/Library/Caches/Homebrew/bbbbbbbb--wget--1.2.tar.gz" || fail 'the newest old Homebrew download was removed'
+test ! -e "$SWEEP_HOME/Library/Caches/Homebrew/aaaaaaaa--wget--1.0.tar.gz" || fail 'an older Homebrew download survived'
 PATH="$bindir:$PATH" "$SWEEP" clean --yes homebrew --empty >/dev/null
 case "$(cat "$SWEEP_HOME/brew.called")" in
   *--prune=all*) ;;
@@ -595,11 +596,19 @@ test -d "$SWEEP_HOME/.Trash/Restore.app" || fail 'restore fixture was not moved 
 test -d "$SWEEP_HOME/Applications/Restore.app" || fail 'the app was not restored from the Trash'
 test ! -e "$SWEEP_HOME/.Trash/Restore.app" || fail 'the restored app stayed in the Trash'
 
-printf 'Menu Helper\n' > "$tmp/btm.txt"
+cat > "$tmp/btm.txt" <<'EOF'
+com.apple.LSSharedFileList.SessionLoginItems
+                 Name: com.apple.Safari
+                 Name: Menu Helper
+EOF
 btm_out="$(SWEEP_BTM_LIST="$tmp/btm.txt" "$SWEEP" login)"
 case "$btm_out" in
   *'Menu Helper'*) ;;
   *) fail 'a non-plist login item was hidden' ;;
+esac
+case "$btm_out" in
+  *'com.apple.Safari'*) ;;
+  *) fail 'an Apple login item was hidden' ;;
 esac
 case "$btm_out" in
   *'shown only'*) ;;
@@ -619,6 +628,82 @@ kept="$(wc -l < "$SWEEP_HOME/.local/share/sweep/removed.txt" | tr -d ' ')"
 if [[ "$kept" -gt 2 ]]; then
   fail "the receipt kept $kept lines"
 fi
+
+mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone"
+python3 - <<PY
+import datetime, plistlib
+p="$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone/Info.plist"
+plistlib.dump({"Device Name":"OnlyPhone","Last Backup Date":datetime.datetime(2024,5,1)}, open(p,"wb"))
+PY
+printf 'b' > "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone/info"
+backups="$("$SWEEP" items backups)"
+case "$backups" in
+  *'only backup of this device'*) ;;
+  *) fail 'the only backup of a device was not marked' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)"
+printf 's' > "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)/file"
+devices="$("$SWEEP" items devices)"
+case "$devices" in
+  *'only copy of this version'*) ;;
+  *) fail 'the only device-support folder was not marked' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/Downloads/OldInstallers"
+printf 'i' > "$SWEEP_HOME/Downloads/OldInstallers/setup.dmg"
+printf 'disk' > "$SWEEP_HOME/Downloads/Extra.dmg"
+loose2="$("$SWEEP" items files)"
+case "$loose2" in
+  *OldInstallers*) ;;
+  *) fail 'a folder in Downloads was not listed' ;;
+esac
+scan_dl="$("$SWEEP" scan)"
+case "$scan_dl" in
+  *downloads*) ;;
+  *) fail 'scan hid installer downloads' ;;
+esac
+test -d "$SWEEP_HOME/Downloads/OldInstallers" || fail 'scan removed a downloads folder'
+
+sample="$tmp/diskutil.txt"
+printf 'Purgeable: 2.0 GB (2147483648 Bytes)\n' > "$sample"
+purge_out="$(SWEEP_DISKUTIL_SAMPLE="$sample" "$SWEEP" scan)"
+case "$purge_out" in
+  *'sweep will not purge it'*) ;;
+  *) fail 'purgeable space was hidden' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/.Trash/Stamp.app"
+printf 'old' > "$SWEEP_HOME/.Trash/Stamp.app/old"
+mkdir -p "$SWEEP_HOME/Applications/Stamp.app/Contents"
+cat > "$SWEEP_HOME/Applications/Stamp.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.stamp</string>
+</dict></plist>
+EOF
+"$SWEEP" uninstall Stamp --yes >/dev/null
+stamped="$(find "$SWEEP_HOME/.Trash" -maxdepth 1 -name 'Stamp-*.app' -print)"
+test -n "$stamped" || fail 'a second uninstall did not use a timestamped Trash name'
+"$SWEEP" uninstall restore Stamp >/dev/null
+test -d "$SWEEP_HOME/Applications/Stamp.app" || fail 'a timestamped Trash app was not restored'
+test ! -e "$SWEEP_HOME/.Trash/Stamp-"*.app || fail 'the timestamped app stayed in the Trash'
+
+dd if=/dev/zero of="$SWEEP_HOME/Applications/Stamp.app/payload" bs=1024 count=2048 >/dev/null 2>&1
+app_list="$(printf 'quit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$app_list" in
+  *Stamp*stays*) ;;
+  *) fail 'an installed app was missing from the first list' ;;
+esac
+printf 'Stamp\nclean\nyes\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu >/dev/null
+test -d "$SWEEP_HOME/.Trash/Stamp.app" || fail 'ticking an app did not move it to the Trash'
+test ! -d "$SWEEP_HOME/Applications/Stamp.app" || fail 'ticking an app deleted it in place'
+
+page_out="$(printf 'more\nuninstall\n\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$page_out" in
+  *'Page 2'*) ;;
+  *) fail 'uninstall returned to the first page' ;;
+esac
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -s bash "$ROOT/sweep" "$ROOT/install.sh"

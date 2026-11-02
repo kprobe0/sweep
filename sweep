@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.15.0
+VERSION=0.16.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -103,24 +103,45 @@ under() {
 }
 
 is_dataless() {
-  local flags
+  local flags n
   flags="$(ls -ldO "$1" 2>/dev/null || true)"
   case "$flags" in
     *dataless*) return 0 ;;
   esac
-  return 1
+  n="$(stat -f %f "$1" 2>/dev/null || printf '0')"
+  [[ $(( ${n:-0} & 1073741824 )) -ne 0 ]]
+}
+
+clone_shared() {
+  python3 -c 'import ctypes,ctypes.util,sys
+libc=ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+libc.getattrlist.argtypes=[ctypes.c_char_p,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_size_t,ctypes.c_ulong]
+libc.getattrlist.restype=ctypes.c_int
+class AttrList(ctypes.Structure):
+    _fields_=[("bitmapcount",ctypes.c_ushort),("reserved",ctypes.c_ushort),
+              ("commonattr",ctypes.c_uint),("volattr",ctypes.c_uint),
+              ("dirattr",ctypes.c_uint),("fileattr",ctypes.c_uint),
+              ("forkattr",ctypes.c_uint)]
+al=AttrList(5,0,0,0,0,0,0x00001000)
+buf=ctypes.create_string_buffer(32)
+if libc.getattrlist(sys.argv[1].encode(),ctypes.byref(al),buf,32,0x20)!=0:
+    sys.exit(1)
+ref=int.from_bytes(buf.raw[4:8],"little")
+sys.exit(0 if ref>1 else 1)' "$1" 2>/dev/null
 }
 
 shares_bytes() {
   local path="$1" n found
   if [[ -f "$path" && ! -L "$path" ]]; then
     n="$(stat -f %l "$path" 2>/dev/null || printf '1')"
-    [[ "${n:-1}" -gt 1 ]]
+    [[ "${n:-1}" -gt 1 ]] && return 0
+    clone_shared "$path"
     return
   fi
   [[ -d "$path" && ! -L "$path" ]] || return 1
   found="$(find_x "$path" -type f -links +1 -print 2>/dev/null | awk 'NR==1 { print; exit }' || true)"
-  [[ -n "$found" ]]
+  [[ -n "$found" ]] && return 0
+  clone_shared "$path"
 }
 
 already_noted() {
@@ -694,6 +715,47 @@ hint_of() {
   esac
 }
 
+formula_key() {
+  local base="$1" rest
+  base="$(basename "$base")"
+  case "$base" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]--*)
+      rest="${base#*--}"
+      ;;
+    *) rest="$base" ;;
+  esac
+  printf '%s' "${rest%%--*}"
+}
+
+each_homebrew_drop() {
+  local c file key epoch best line age
+  c="$(brew_cache_dir || true)"
+  [[ -n "$c" ]] || return 0
+  if [[ "$HOMEBREW_EMPTY" -eq 1 ]]; then
+    find_x "$c" -type f -print 2>/dev/null || true
+    return 0
+  fi
+  local table maxes
+  table="$(mktemp)"
+  maxes="$(mktemp)"
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    key="$(formula_key "$file")"
+    epoch="$(path_epoch "$file")"
+    printf '%s\t%s\t%s\n' "$key" "$epoch" "$file"
+  done < <(find_x "$c" -type f -print 2>/dev/null || true) >"$table"
+  awk -F '\t' '{ if ($2+0 > m[$1]) m[$1]=$2+0 } END { for (k in m) print k "\t" m[k] }' "$table" >"$maxes"
+  while IFS=$'\t' read -r key epoch file; do
+    [[ -n "$file" ]] || continue
+    best="$(awk -F '\t' -v k="$key" '$1==k { print $2; exit }' "$maxes")"
+    [[ "$epoch" -lt "${best:-0}" ]] || continue
+    age="$(path_age_days "$file")"
+    [[ "${age:-0}" -ge "$HOMEBREW_PRUNE_DAYS" ]] || continue
+    printf '%s\n' "$file"
+  done <"$table"
+  rm -f "$table" "$maxes"
+}
+
 homebrew_kb() {
   local c file sum k
   c="$(brew_cache_dir || true)"
@@ -703,24 +765,22 @@ homebrew_kb() {
     return
   fi
   sum=0
-  while IFS= read -r -d '' file; do
-    k="$(du -sk "$file" 2>/dev/null | awk '{print $1}')" || k=0
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    k="$(kb_of "$file")"
     sum=$((sum + ${k:-0}))
-  done < <(find_x "$c" -type f -mtime +"$HOMEBREW_PRUNE_DAYS" -print0 2>/dev/null || true)
+  done < <(each_homebrew_drop)
   printf '%s' "$sum"
 }
 
 list_old_homebrew() {
-  local c file kb
-  c="$(brew_cache_dir || true)"
-  [[ -n "$c" ]] || return 0
+  local file kb
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     kb="$(kb_of "$file")"
     [[ "${kb:-0}" -gt 0 ]] || continue
     printf '%s\t%s\n' "$kb" "$file"
-  done < <(find_x "$c" -type f -mtime +"$HOMEBREW_PRUNE_DAYS" -print 2>/dev/null || true) |
-    sort -nr | awk -F '\t' 'NR <= 12 { print }' |
+  done < <(each_homebrew_drop) | sort -nr | awk -F '\t' 'NR <= 12 { print }' |
     while IFS=$'\t' read -r kb file; do
       [[ -n "$file" ]] || continue
       emit_item "$kb" "$(basename "$file")" "$file" path
@@ -728,24 +788,26 @@ list_old_homebrew() {
 }
 
 clean_homebrew() {
-  local c file
+  local c file sum k
   c="$(brew_cache_dir || true)"
-  if command -v brew >/dev/null 2>&1 && [[ -n "$c" ]]; then
-    if [[ "$HOMEBREW_EMPTY" -eq 1 ]]; then
-      brew cleanup -s --prune=all >/dev/null
-    else
-      brew cleanup -s --prune="$HOMEBREW_PRUNE_DAYS" >/dev/null
-    fi
+  if [[ "$HOMEBREW_EMPTY" -eq 1 ]] && command -v brew >/dev/null 2>&1 && [[ -n "$c" ]]; then
+    brew cleanup -s --prune=all >/dev/null
   fi
   [[ -n "$c" ]] || return 0
   if [[ "$HOMEBREW_EMPTY" -eq 1 ]]; then
+    k="$(kb_of "$c")"
+    remember_removal "$k" "Homebrew downloads" "$c"
     empty_dir "$c"
     return 0
   fi
-  while IFS= read -r -d '' file; do
-    remember_path "$file"
+  sum=0
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    k="$(kb_of "$file")"
+    sum=$((sum + ${k:-0}))
     rm -f "$file"
-  done < <(find_x "$c" -type f -mtime +"$HOMEBREW_PRUNE_DAYS" -print0 2>/dev/null || true)
+  done < <(each_homebrew_drop)
+  remember_removal "$sum" "Homebrew downloads" "$c"
 }
 
 clean_group() {
@@ -842,8 +904,12 @@ disk_free_kb() {
 
 disk_purgeable_kb() {
   local bytes
-  command -v diskutil >/dev/null 2>&1 || return 0
-  bytes="$(diskutil info "$SWEEP_HOME" 2>/dev/null | sed -n 's/.*Purgeable Space:.*(\([0-9][0-9]*\) Bytes.*/\1/p' | awk 'NR==1 { print; exit }')"
+  if [[ -n "${SWEEP_TEST:-}" && -n "${SWEEP_DISKUTIL_SAMPLE:-}" && -f "$SWEEP_DISKUTIL_SAMPLE" ]]; then
+    bytes="$(sed -n 's/.*[Pp]urgeable.*(\([0-9][0-9]*\) Bytes.*/\1/p' "$SWEEP_DISKUTIL_SAMPLE" | awk 'NR==1 { print; exit }')"
+  else
+    command -v diskutil >/dev/null 2>&1 || return 0
+    bytes="$(diskutil info "$SWEEP_HOME" 2>/dev/null | sed -n 's/.*[Pp]urgeable.*(\([0-9][0-9]*\) Bytes.*/\1/p' | awk 'NR==1 { print; exit }')"
+  fi
   [[ -n "${bytes:-}" ]] || return 0
   printf '%s' "$((bytes / 1024))"
 }
@@ -879,7 +945,7 @@ print_disk() {
 
 fate_word() {
   case "$1" in
-    trash|backups|archives|downloads|partial|files|orphans|gone) printf 'stays' ;;
+    trash|backups|archives|downloads|partial|files|orphans|gone|installed) printf 'stays' ;;
     *) printf 'rebuilds' ;;
   esac
 }
@@ -909,6 +975,10 @@ each_download() {
 each_loose_download() {
   local f base
   for f in "$SWEEP_HOME/Downloads"/*; do
+    if [[ -d "$f" && ! -L "$f" ]]; then
+      printf '%s\n' "$f"
+      continue
+    fi
     [[ -f "$f" && ! -L "$f" ]] || continue
     base="$(basename "$f")"
     case "$base" in
@@ -959,7 +1029,7 @@ cmd_scan() {
 
   printf '\n  %sOnly when you name them%s\n' "$B" "$Z"
   any=0
-  for group in browsers archives devices docker backups partial files; do
+  for group in browsers archives devices docker backups downloads partial files; do
     status "Measuring $group"
     kb="$(measure "$group")"
     clear_status
@@ -1135,6 +1205,58 @@ path_epoch() {
   stat -f %m "$1" 2>/dev/null || printf '0'
 }
 
+backup_device_name() {
+  python3 -c 'import os,plistlib,sys
+info=os.path.join(sys.argv[1],"Info.plist")
+name=""
+if os.path.isfile(info):
+    try:
+        name=plistlib.load(open(info,"rb")).get("Device Name") or ""
+    except Exception:
+        name=""
+if not name:
+    name="Device backup "+os.path.basename(sys.argv[1])[:8]
+print(name)' "$1"
+}
+
+backup_only_suffix() {
+  local path="$1" name other count other_name dir
+  name="$(backup_device_name "$path")"
+  [[ -n "$name" ]] || return 0
+  count=0
+  dir="$(dirname "$path")"
+  for other in "$dir"/*; do
+    [[ -d "$other" && ! -L "$other" ]] || continue
+    other_name="$(backup_device_name "$other")"
+    [[ "$other_name" == "$name" ]] && count=$((count + 1))
+  done
+  [[ "$count" -eq 1 ]] && printf ', only backup of this device'
+}
+
+version_token() {
+  local name="$1" tok
+  tok="$(printf '%s' "$name" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
+  if [[ -z "$tok" ]]; then
+    tok="$(printf '%s' "$name" | awk '{print $2}')"
+  fi
+  printf '%s' "$tok"
+}
+
+support_only_suffix() {
+  local path="$1" token parent sib count
+  token="$(version_token "$(basename "$path")")"
+  [[ -n "$token" ]] || return 0
+  parent="$(dirname "$path")"
+  count=0
+  for sib in "$parent"/*; do
+    [[ -e "$sib" ]] || continue
+    case "$(basename "$sib")" in
+      *"$token"*) count=$((count + 1)) ;;
+    esac
+  done
+  [[ "$count" -eq 1 ]] && printf ', only copy of this version'
+}
+
 backup_pretty() {
   python3 -c 'import datetime,os,plistlib,sys
 root=sys.argv[1]
@@ -1163,7 +1285,7 @@ pretty_label() {
   parent="$(basename "$(dirname "$path")")"
   case "$path" in
     */MobileSync/Backup/*)
-      backup_pretty "$path"
+      printf '%s%s' "$(backup_pretty "$path")" "$(backup_only_suffix "$path")"
       return
       ;;
     */Downloads/*)
@@ -1207,7 +1329,7 @@ pretty_label() {
     */Xcode/Archives/*) printf '%s, %s' "$(basename "$path")" "$(path_date "$path")"; return ;;
     */CoreSimulator/Caches) printf 'Simulator cache'; return ;;
     */Caches/com.apple.dt.Xcode) printf 'Xcode cache'; return ;;
-    */node_modules) printf 'Modules in %s' "$(basename "$(dirname "$path")")"; return ;;
+    */node_modules) printf '%s project' "$(basename "$(dirname "$path")")"; return ;;
     */__pycache__) printf 'Python cache in %s' "$parent"; return ;;
     */.next) printf 'Next.js build in %s' "$parent"; return ;;
     */.turbo) printf 'Turbo cache in %s' "$parent"; return ;;
@@ -1236,10 +1358,10 @@ pretty_label() {
       ;;
   esac
   case "$label" in
-    "iOS DeviceSupport / "*) printf 'iPhone support %s, %s' "${label#iOS DeviceSupport / }" "$(path_date "$path")"; return ;;
-    "watchOS DeviceSupport / "*) printf 'Watch support %s, %s' "${label#watchOS DeviceSupport / }" "$(path_date "$path")"; return ;;
-    "tvOS DeviceSupport / "*) printf 'TV support %s, %s' "${label#tvOS DeviceSupport / }" "$(path_date "$path")"; return ;;
-    "visionOS DeviceSupport / "*) printf 'Vision support %s, %s' "${label#visionOS DeviceSupport / }" "$(path_date "$path")"; return ;;
+    "iOS DeviceSupport / "*) printf 'iPhone support %s, %s%s' "${label#iOS DeviceSupport / }" "$(path_date "$path")" "$(support_only_suffix "$path")"; return ;;
+    "watchOS DeviceSupport / "*) printf 'Watch support %s, %s%s' "${label#watchOS DeviceSupport / }" "$(path_date "$path")" "$(support_only_suffix "$path")"; return ;;
+    "tvOS DeviceSupport / "*) printf 'TV support %s, %s%s' "${label#tvOS DeviceSupport / }" "$(path_date "$path")" "$(support_only_suffix "$path")"; return ;;
+    "visionOS DeviceSupport / "*) printf 'Vision support %s, %s%s' "${label#visionOS DeviceSupport / }" "$(path_date "$path")" "$(support_only_suffix "$path")"; return ;;
     "Google/"*) printf '%s' "${label#Google/}"; return ;;
   esac
   case "$base" in
@@ -1669,21 +1791,90 @@ shared_paths() {
   done
 }
 
+trash_map_file() {
+  printf '%s/.local/share/sweep/trash-map.txt' "$SWEEP_HOME"
+}
+
+remember_trash_origin() {
+  local dest="$1" parent="$2" file
+  file="$(trash_map_file)"
+  mkdir -p "$(dirname "$file")"
+  printf '%s\t%s\n' "$(basename "$dest")" "$parent" >>"$file"
+}
+
+trash_origin_of() {
+  local base="$1" file name dir
+  file="$(trash_map_file)"
+  [[ -f "$file" ]] || return 1
+  while IFS=$'\t' read -r name dir; do
+    if [[ "$name" == "$base" ]]; then
+      printf '%s' "$dir"
+      return 0
+    fi
+  done <"$file"
+  return 1
+}
+
+find_trashed_app() {
+  local name="$1" cand best stamp found
+  found=""
+  best=0
+  if [[ -d "$SWEEP_HOME/.Trash/$name.app" ]]; then
+    found="$SWEEP_HOME/.Trash/$name.app"
+    best="$(path_epoch "$found")"
+  fi
+  for cand in "$SWEEP_HOME/.Trash/$name"-[0-9][0-9][0-9][0-9][0-9][0-9].app; do
+    [[ -d "$cand" ]] || continue
+    stamp="$(path_epoch "$cand")"
+    if [[ "${stamp:-0}" -ge "$best" ]]; then
+      best="$stamp"
+      found="$cand"
+    fi
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s' "$found"
+}
+
+move_app_to_trash() {
+  local app="$1" id copies dest parent
+  [[ -d "$app" ]] || die "No app at $app"
+  id="$(bundle_id_of "$app" || true)"
+  [[ -n "$id" ]] || die "$(basename "$app" .app) has no bundle id. Sweep will not guess."
+  if app_is_open "$app"; then
+    die "$(basename "$app" .app) is open. Quit it, then run this again."
+  fi
+  copies="$(app_copies "$id")"
+  if [[ "${copies:-0}" -gt 1 ]]; then
+    die "Another copy of $id is installed. Sweep will not remove one of them."
+  fi
+  parent="$(dirname "$app")"
+  mkdir -p "$SWEEP_HOME/.Trash"
+  dest="$SWEEP_HOME/.Trash/$(basename "$app")"
+  if [[ -e "$dest" ]]; then
+    dest="$SWEEP_HOME/.Trash/$(basename "$app" .app)-$(date '+%H%M%S').app"
+  fi
+  remember_removal "$(kb_of "$app")" "$(basename "$app" .app)" "$dest"
+  remember_trash_origin "$dest" "$parent"
+  mv "$app" "$dest"
+  printf '  Moved to the Trash: %s\n' "${dest#"$SWEEP_HOME"/}"
+  printf '  While it is still there: sweep uninstall restore %s\n' "$(basename "$app" .app)"
+}
+
 cmd_uninstall_restore() {
   local name="$1" trash root app
   [[ -n "$name" ]] || die "Name the app. Example: sweep uninstall restore Widget"
-  trash="$SWEEP_HOME/.Trash/$name.app"
-  [[ -d "$trash" ]] || die "$name is not in the Trash."
+  trash="$(find_trashed_app "$name" || true)"
+  [[ -n "$trash" && -d "$trash" ]] || die "$name is not in the Trash."
   while IFS= read -r app; do
     if [[ "$(basename "$app" .app)" == "$name" ]]; then
       die "$name is already installed."
     fi
   done < <(each_app)
-  root="$(app_search_roots | awk 'NR==1 { print; exit }')"
-  [[ -n "$root" ]] || die "No application folder to restore into."
+  root="$(trash_origin_of "$(basename "$trash")" || true)"
+  [[ -n "$root" ]] || die "Sweep does not know which folder $name came from."
   mkdir -p "$root"
   mv "$trash" "$root/$name.app"
-  printf '  Restored %s\n' "${root#"$SWEEP_HOME"/}/$name.app"
+  printf '  Restored %s\n' "$root/$name.app"
 }
 
 cmd_uninstall() {
@@ -1778,16 +1969,7 @@ cmd_uninstall() {
   if [[ "${copies:-0}" -gt 1 ]]; then
     die "Another copy of $id is installed. Sweep will not remove one of them."
   fi
-  mkdir -p "$SWEEP_HOME/.Trash"
-  local dest
-  dest="$SWEEP_HOME/.Trash/$(basename "$app")"
-  if [[ -e "$dest" ]]; then
-    dest="$SWEEP_HOME/.Trash/$(basename "$app" .app)-$(date '+%H%M%S').app"
-  fi
-  remember_removal "$(kb_of "$app")" "$(basename "$app" .app)" "$dest"
-  mv "$app" "$dest"
-  printf '  Moved to the Trash: %s\n' "${dest#"$SWEEP_HOME"/}"
-  printf '  While it is still there: sweep uninstall restore %s\n' "$name"
+  move_app_to_trash "$app"
   if [[ "$UNINSTALL_LEFTOVERS" -eq 1 ]]; then
     while IFS= read -r p; do
       [[ -n "$p" ]] || continue
@@ -1914,38 +2096,37 @@ cmd_orphans() {
   [[ "$found" -eq 1 ]] || printf '  None.\n'
 }
 
+parse_login_text() {
+  awk '
+    /^com\.apple\.LSSharedFileList\./ { next }
+    /^[[:space:]]*Name:[[:space:]]*/ {
+      sub(/^[[:space:]]*Name:[[:space:]]*/, "")
+      if ($0 != "") print
+      next
+    }
+    /^[[:space:]]*$/ { next }
+    /:/ { next }
+    { print }
+  ' | awk 'NF && !seen[$0]++'
+}
+
 each_other_login() {
-  local out pid i
+  local id
   if [[ -n "${SWEEP_TEST:-}" ]]; then
     if [[ -n "${SWEEP_BTM_LIST:-}" && -f "$SWEEP_BTM_LIST" ]]; then
-      cat "$SWEEP_BTM_LIST"
+      parse_login_text <"$SWEEP_BTM_LIST"
     fi
     return 0
   fi
   real_machine || return 0
   command -v sfltool >/dev/null 2>&1 || return 0
-  out="$(mktemp)"
-  sfltool dumpbtm >"$out" 2>/dev/null &
-  pid=$!
-  i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    i=$((i + 1))
-    if [[ "$i" -gt 20 ]]; then
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      rm -f "$out"
-      return 0
-    fi
-    sleep 0.25
-  done
-  wait "$pid" 2>/dev/null || true
-  awk '
-    /Name:/ {
-      sub(/^.*Name:[[:space:]]*/, "")
-      if ($0 != "") print
-    }
-  ' "$out" | awk '!seen[$0]++'
-  rm -f "$out"
+  for id in \
+    com.apple.LSSharedFileList.SessionLoginItems \
+    com.apple.LSSharedFileList.GlobalLoginItems \
+    com.apple.LSSharedFileList.SFLServiceManagementLoginItems
+  do
+    sfltool list-info "$id" 2>/dev/null || true
+  done | parse_login_text
 }
 
 show_other_logins() {
@@ -2025,7 +2206,7 @@ cmd_last() {
 delete_item() {
   local how="$1" path="$2" kb name
   case "$how" in
-    simulators|orphan|homebrew) ;;
+    simulators|orphan|homebrew|trashapp) ;;
     docker) remember_removal "$(docker_kb)" "Docker unused data" ;;
     *)
       if [[ -e "$path" || -L "$path" ]]; then
@@ -2053,6 +2234,9 @@ delete_item() {
       real_machine || return 0
       command -v xcrun >/dev/null 2>&1 || return 0
       xcrun simctl delete unavailable >/dev/null 2>&1 || true
+      ;;
+    trashapp)
+      move_app_to_trash "$path"
       ;;
     simone)
       local udid="${path#sim:}"
@@ -2227,6 +2411,16 @@ ensure_catalog() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$kb" "$plain" "$(basename "$path")" "$path" orphan orphans >>"$MENU_DIR/catalog.tmp"
   done < <(each_orphan)
+  status "Measuring apps"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    kb="$(kb_of "$path")"
+    [[ "${kb:-0}" -gt 0 ]] || continue
+    plain="$(basename "$path" .app)"
+    label="$(bundle_id_of "$path" || true)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$kb" "$plain" "${label:-no bundle id}" "$path" trashapp installed >>"$MENU_DIR/catalog.tmp"
+  done < <(each_app)
   clear_status
   sort -nr "$MENU_DIR/catalog.tmp" >"$MENU_DIR/catalog"
   rm -f "$MENU_DIR/catalog.tmp"
@@ -2242,7 +2436,7 @@ catalog_has_path() {
 }
 
 care_word() {
-  [[ "$1" == "orphans" || "$1" == "gone" ]] && { printf 'ask first'; return; }
+  [[ "$1" == "orphans" || "$1" == "gone" || "$1" == "installed" ]] && { printf 'ask first'; return; }
   case " $OPTIONAL_GROUPS " in
     *" $1 "*) printf 'ask first' ;;
     *) printf 'safe' ;;
@@ -2334,7 +2528,7 @@ menu_draw_home() {
   safe_sum=0
   while IFS=$'\t' read -r kb plain label path how group; do
     [[ -n "$path" ]] || continue
-    if [[ -n "$FILTER" ]] && ! text_has "$plain $label" "$FILTER"; then
+    if [[ -n "$FILTER" ]] && ! text_has "$plain $label $path" "$FILTER"; then
       continue
     fi
     if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
@@ -2506,7 +2700,7 @@ menu_draw_group() {
   total=0
   while IFS=$'\t' read -r kb plain label path how care; do
     [[ "$care" == "$group" ]] || continue
-    if [[ -n "$FILTER" ]] && ! text_has "$plain $label" "$FILTER"; then
+    if [[ -n "$FILTER" ]] && ! text_has "$plain $label $path" "$FILTER"; then
       continue
     fi
     total=$((total + 1))
@@ -2637,7 +2831,16 @@ menu_clean_selected() {
     NOTE="Tick a number first."
     return 0
   fi
-  printf '\n  About %s. This is permanent. Nothing here is moved to the Trash.\n' "$(human "$sum")"
+  local any_app=0
+  while IFS=$'\t' read -r n kb plain label path how group; do
+    path_selected "$path" || continue
+    [[ "$how" == "trashapp" ]] && any_app=1
+  done <"$MENU_DIR/items"
+  if [[ "$any_app" -eq 1 ]]; then
+    printf '\n  About %s. Apps move to the Trash. Other folders are deleted for good.\n' "$(human "$sum")"
+  else
+    printf '\n  About %s. This is permanent. Nothing here is moved to the Trash.\n' "$(human "$sum")"
+  fi
   printf '  Type yes to delete, or press return to keep it.\n'
   if menu_confirm_yes; then
     local before
@@ -2702,13 +2905,16 @@ walk_includes() {
 }
 
 menu_stays_names() {
-  local n kb plain label path how group names
+  local kb plain label path how group names
   names=""
-  [[ -f "$MENU_DIR/items" ]] || return 0
-  while IFS=$'\t' read -r n kb plain label path how group; do
+  [[ -f "$MENU_DIR/catalog" ]] || return 0
+  while IFS=$'\t' read -r kb plain label path how group; do
     [[ "$(fate_word "$group")" == "stays" ]] || continue
+    if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
+      continue
+    fi
     names="${names:+$names, }$plain"
-  done <"$MENU_DIR/items"
+  done <"$MENU_DIR/catalog"
   printf '%s' "$names"
 }
 
@@ -2748,6 +2954,7 @@ why_item() {
     simulators) printf 'Removing the group deletes every unavailable simulator.' ;;
     simone) printf 'This removes only this simulator.' ;;
     files) printf 'A file in Downloads. It stays until you tick it.' ;;
+    installed) printf 'This app is moved to the Trash. It is not deleted.' ;;
     *) printf 'Sweep can remove this.' ;;
   esac
 }
@@ -2785,6 +2992,9 @@ menu_walk() {
     menu_blank
     print_disk
     printf '\n  %s%s%s\n' "$B" "$plain" "$Z"
+    if [[ "$path" != "-" && "$path" != sim:* ]]; then
+      printf '  %s\n' "${path#"$SWEEP_HOME"/}"
+    fi
     printf '  %s of %s\n' "$n" "$total"
     printf '  %s\n' "$(human "$kb")"
     printf '  %s\n' "$(why_item "$group")"
@@ -2938,7 +3148,7 @@ menu_uninstall() {
   while IFS= read -r app; do
     [[ -n "$app" ]] || continue
     n=$((n + 1))
-    printf '  %2d  %s\n' "$n" "$(basename "$app" .app)"
+    printf '  %2d  %10s  %s\n' "$n" "$(human "$(kb_of "$app")")" "$(basename "$app" .app)"
     printf '%s\t%s\n' "$n" "$app" >>"$MENU_DIR/apps"
   done < <(each_app)
   if [[ "$n" -eq 0 ]]; then
