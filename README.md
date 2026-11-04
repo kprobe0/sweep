@@ -2,7 +2,7 @@
 
 A quiet disk cleaner for macOS. Open it, type a number, tick the folders you want, then type `yes`. Nothing is deleted before that.
 
-![sweep menu, with Spotify ticked](docs/menu.png)
+![sweep menu, with an app left unticked](docs/menu.png)
 
 Paid cleaner apps charge you to empty caches, then sell a subscription on top. sweep is one command, the list of paths is in the source, and it does not free RAM, scan for viruses, or phone home.
 
@@ -50,7 +50,7 @@ make install
 - Type `caches`, `trash`, `dev`, or `backups` to open just that list.
 - Type `groups` for the short list of those names.
 - Type `safe`, then `yes`, to clear the usual caches and leave backups alone.
-- Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`. `go` leaves a folder alone when its app is still open, and it names every `stays` line it did not touch, including ones on later pages.
+- Type `go`, then `yes`, to remove the safe folders on the list. Folders under 1 MB stay hidden until you type `small`. `go` leaves a folder alone when its app is still open. It names up to four lines it left alone, then how many more. Type `stays` for the rest. An app already in the Trash stays unticked.
 - An installed app of about 100 MB or more is on that list too, unticked. Smaller apps stay on `sweep uninstall`. Ticking an app moves it to the Trash. `sweep uninstall restore Name` puts it back in the folder it came from, including a timestamped Trash name. Emptying the Trash leaves an app that is already in the Trash.
 - Type `walk stays` to answer yes or no for backups, installers, and leftovers. The path is under the name. `yes` moves an app to the Trash and deletes a backup for good. The only backup of a device asks you to type that device's name.
 - Type `walk` to go one safe folder at a time. `yes` deletes it, `no` keeps it, `quit` stops.
@@ -78,7 +78,7 @@ sweep last all
 sweep clean homebrew --empty --yes
 ```
 
-`sweep clean --yes` covers caches the system or the tool will rebuild: user caches whose app is still installed, Homebrew downloads older than 120 days, npm and the other dev caches, Xcode DerivedData, a few app caches, old logs, Quick Look thumbnails, and the Trash. `sweep clean homebrew --empty --yes` clears the rest of the Homebrew cache.
+`sweep clean --yes` covers caches the system or the tool will rebuild: user caches whose app is still installed, Homebrew downloads older than 120 days, npm and the other dev caches, the pnpm store when pnpm is installed, Xcode DerivedData, a few app caches, old logs, Quick Look thumbnails, and the Trash. An app sitting in the Trash is not part of that. `sweep clean homebrew --empty --yes` clears the rest of the Homebrew cache.
 
 These stay put unless you name them:
 

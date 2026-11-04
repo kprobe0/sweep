@@ -3,7 +3,7 @@
 # Deletes regenerable caches. Leaves your files alone unless you name them.
 # Nothing is removed unless you pass --yes.
 
-VERSION=0.17.0
+VERSION=0.18.0
 
 set -euo pipefail
 shopt -s nullglob
@@ -214,25 +214,62 @@ already_noted() {
   return 1
 }
 
-kb_lookup() {
-  local path="$1" hit
-  [[ -n "${MENU_DIR:-}" && -f "$MENU_DIR/sizes" ]] || return 1
-  hit="$(awk -F '\t' -v p="$path" '$1==p { print $2; found=1; exit } END { if (!found) exit 1 }' "$MENU_DIR/sizes")" || return 1
+size_store() {
+  printf '%s/sizes' "$SWEEP_HOME/.local/share/sweep"
+}
+
+kb_from_file() {
+  local file="$1" path="$2" mtime="$3" hit
+  [[ -f "$file" ]] || return 1
+  hit="$(awk -F '\t' -v p="$path" -v m="$mtime" '$1==p && $2==m { print $3; found=1; exit } END { if (!found) exit 1 }' "$file")" || return 1
+  [[ "$hit" -gt 0 ]] || return 1
   printf '%s' "$hit"
 }
 
+kb_lookup() {
+  local path="$1" mtime hit
+  mtime="$(stat -f %Fm "$path" 2>/dev/null || true)"
+  [[ -n "$mtime" ]] || return 1
+  if [[ -n "${MENU_DIR:-}" ]]; then
+    if hit="$(kb_from_file "$MENU_DIR/sizes" "$path" "$mtime")"; then
+      printf '%s' "$hit"
+      return 0
+    fi
+  fi
+  if hit="$(kb_from_file "$(size_store)" "$path" "$mtime")"; then
+    printf '%s' "$hit"
+    return 0
+  fi
+  return 1
+}
+
 kb_store() {
-  local path="$1" k="$2"
-  [[ -n "${MENU_DIR:-}" ]] || return 0
-  printf '%s\t%s\n' "$path" "$k" >>"$MENU_DIR/sizes"
+  local path="$1" k="$2" mtime line
+  [[ "${k:-0}" -gt 0 ]] || return 0
+  mtime="$(stat -f %Fm "$path" 2>/dev/null || true)"
+  [[ -n "$mtime" ]] || return 0
+  line="$(printf '%s\t%s\t%s' "$path" "$mtime" "$k")"
+  if [[ -n "${MENU_DIR:-}" ]]; then
+    printf '%s\n' "$line" >>"$MENU_DIR/sizes"
+  fi
+  mkdir -p "$(dirname "$(size_store)")"
+  printf '%s\n' "$line" >>"$(size_store)"
+}
+
+forget_size_file() {
+  local file="$1" path="$2" next
+  [[ -f "$file" ]] || return 0
+  next="$file.next"
+  awk -F '\t' -v p="$path" '$1 != p && index($1, p "/") != 1' "$file" >"$next" || true
+  mv "$next" "$file"
 }
 
 forget_size() {
-  local path="$1" next
-  [[ -n "${MENU_DIR:-}" && -f "$MENU_DIR/sizes" ]] || return 0
-  next="$MENU_DIR/sizes.next"
-  awk -F '\t' -v p="$path" '$1 != p && index($1, p "/") != 1' "$MENU_DIR/sizes" >"$next" || true
-  mv "$next" "$MENU_DIR/sizes"
+  local path="$1"
+  if [[ -n "${MENU_DIR:-}" ]]; then
+    forget_size_file "$MENU_DIR/sizes" "$path"
+  fi
+  forget_size_file "$(size_store)" "$path"
 }
 
 kb_of() {
@@ -322,23 +359,38 @@ protected() {
   return 1
 }
 
+note_left() {
+  local path="$1" why="$2" rel
+  rel="${path#"$SWEEP_HOME"/}"
+  if [[ -n "$why" ]]; then
+    printf 'skipped %s. %s\n' "$rel" "$why" >&2
+  else
+    printf 'skipped %s\n' "$rel" >&2
+  fi
+  if [[ -n "${MENU_DIR:-}" ]]; then
+    printf '%s\n' "$rel" >>"$MENU_DIR/skipped"
+  fi
+}
+
 remove_one() {
   local parent="$1" path="$2" note nlink
+  DID_REMOVE=0
   [[ -e "$path" || -L "$path" ]] || return 0
   if [[ -L "$path" ]]; then
     rm "$path"
+    DID_REMOVE=1
     return 0
   fi
   if ! under "$parent" "$path"; then
-    printf 'skipped %s\n' "$path" >&2
+    note_left "$path" ""
     return 0
   fi
   if protected "$path"; then
-    printf 'skipped %s\n' "$path" >&2
+    note_left "$path" ""
     return 0
   fi
   if is_dataless "$path"; then
-    printf 'skipped %s. It is offline and sweep will not download it.\n' "${path#"$SWEEP_HOME"/}" >&2
+    note_left "$path" "It is offline and sweep will not download it."
     return 0
   fi
   if shares_bytes "$path"; then
@@ -354,11 +406,12 @@ remove_one() {
         note="Sweep cannot see which copy is the original, so this file was left in place."
       fi
     fi
-    printf 'skipped %s. %s\n' "${path#"$SWEEP_HOME"/}" "$note" >&2
+    note_left "$path" "$note"
     return 0
   fi
   forget_size "$path"
   rm -rf "$path"
+  DID_REMOVE=1
 }
 
 clean_trash() {
@@ -519,8 +572,17 @@ browser_paths() {
     "$h/Library/Caches/com.operasoftware.OperaGX"
 }
 
+pnpm_store_dir() {
+  local dir
+  command -v pnpm >/dev/null 2>&1 || return 1
+  dir="$(pnpm store path 2>/dev/null || true)"
+  [[ -n "$dir" && -d "$dir" && ! -L "$dir" ]] || return 1
+  under "$SWEEP_HOME" "$dir" || return 1
+  printf '%s' "$dir"
+}
+
 dev_paths() {
-  local h="$SWEEP_HOME"
+  local h="$SWEEP_HOME" store
   printf '%s\n' \
     "$h/.npm" \
     "$h/.cache/pip" \
@@ -539,6 +601,10 @@ dev_paths() {
     "$h/Library/Caches/org.carthage.CarthageKit" \
     "$h/Library/Caches/zig" \
     "$h/.cache/swift-package-manager"
+  store="$(pnpm_store_dir || true)"
+  if [[ -n "$store" ]]; then
+    printf '%s\n' "$store"
+  fi
 }
 
 xcode_paths() {
@@ -726,7 +792,8 @@ docker_kb() {
 project_rows() {
   local root="$SWEEP_HOME"
   find_x "$root" \
-    \( -type d \( -name Library -o -name .Trash -o -name .git \) \) -prune -o \
+    \( -type d \( -name Library -o -name .Trash -o -name .git -o -name '*.photoslibrary' \) \) -prune -o \
+    \( -path "$root/Pictures" -o -path "$root/Movies" -o -path "$root/Music" \) -prune -o \
     \( -type d -name node_modules \) -prune -print -o \
     \( -type d -name target \) -prune -print -o \
     \( -type d -name .build \) -prune -print -o \
@@ -780,6 +847,21 @@ clean_projects() {
   done < <(project_rows)
 }
 
+trash_free_kb() {
+  local root child base sum k
+  root="$SWEEP_HOME/.Trash"
+  sum=0
+  [[ -d "$root" && ! -L "$root" ]] || { printf '0'; return; }
+  for child in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    base="$(basename "$child")"
+    [[ "$base" == *.app ]] && continue
+    k="$(kb_of "$child")"
+    sum=$((sum + ${k:-0}))
+  done
+  printf '%s' "$sum"
+}
+
 measure() {
   local group="$1"
   case "$group" in
@@ -790,7 +872,7 @@ measure() {
     apps) app_paths | sum_paths ;;
     quicklook) quicklook_paths | sum_paths ;;
     logs) logs_kb ;;
-    trash) kb_of "$SWEEP_HOME/.Trash" ;;
+    trash) trash_free_kb ;;
     browsers) browser_paths | sum_paths ;;
     archives) kb_of "$SWEEP_HOME/Library/Developer/Xcode/Archives" ;;
     devices) device_paths | sum_paths ;;
@@ -956,7 +1038,7 @@ clean_group() {
     homebrew) clean_homebrew ;;
     dev)
       dev_paths | clean_paths
-      if real_machine && command -v pnpm >/dev/null 2>&1; then
+      if command -v pnpm >/dev/null 2>&1; then
         pnpm store prune >/dev/null 2>&1 || true
       fi
       ;;
@@ -972,7 +1054,7 @@ clean_group() {
     trash) clean_trash ;;
     browsers) browser_paths | clean_paths ;;
     archives) empty_dir "$SWEEP_HOME/Library/Developer/Xcode/Archives" ;;
-    devices) device_paths | clean_paths ;;
+    devices) clean_device_support ;;
     simulators)
       real_machine || return 0
       command -v xcrun >/dev/null 2>&1 || return 0
@@ -983,9 +1065,7 @@ clean_group() {
       docker_up || return 0
       docker system prune -f >/dev/null 2>&1 || true
       ;;
-    backups)
-      wipe_named "$SWEEP_HOME/Library/Application Support/MobileSync/Backup" "MobileSync/Backup"
-      ;;
+    backups) clean_backups ;;
     projects) clean_projects ;;
     downloads)
       local f
@@ -1015,8 +1095,44 @@ clean_group() {
   esac
 }
 
+clean_backups() {
+  local root child plain
+  root="$SWEEP_HOME/Library/Application Support/MobileSync/Backup"
+  [[ -d "$root" && ! -L "$root" ]] || return 0
+  for child in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [[ -e "$child" || -L "$child" ]] || continue
+    plain="$(pretty_label "$(basename "$child")" "$child")"
+    if ! ask_typed_confirm "$plain" "$child"; then
+      printf '  Left %s in place.\n' "$(basename "$child")"
+      continue
+    fi
+    delete_backup_child "$child"
+  done
+}
+
+clean_device_support() {
+  local root child prefix plain base
+  while IFS= read -r root <&3; do
+    [[ -d "$root" && ! -L "$root" ]] || continue
+    prefix="$(basename "$root") / "
+    for child in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [[ -e "$child" || -L "$child" ]] || continue
+      base="$(basename "$child")"
+      plain="$(pretty_label "${prefix}${base}" "$child")"
+      if ! ask_typed_confirm "$plain" "$child"; then
+        printf '  Left %s in place.\n' "$base"
+        continue
+      fi
+      remember_path "$child"
+      remove_one "$root" "$child" || true
+    done
+  done 3< <(device_paths)
+}
+
 DEFAULT_GROUPS="caches homebrew dev xcode apps quicklook logs trash"
+FIRST_GROUPS="caches dev apps quicklook logs trash"
 OPTIONAL_GROUPS="browsers archives devices simulators docker backups projects downloads partial files"
+LATER_GROUPS="homebrew xcode $OPTIONAL_GROUPS"
 
 known_group() {
   case " $DEFAULT_GROUPS $OPTIONAL_GROUPS " in
@@ -1473,6 +1589,7 @@ pretty_label() {
     */Library/Caches/org.carthage.CarthageKit) printf 'Carthage'; return ;;
     */Library/Caches/zig) printf 'Zig cache'; return ;;
     */.cache/swift-package-manager|*/org.swift.swiftpm) printf 'Swift packages'; return ;;
+    */pnpm/store|*/pnpm/store/*|*/pnpm-store|*/pnpm-store/*) printf 'pnpm store'; return ;;
     */Xcode/DerivedData) printf 'Xcode build files'; return ;;
     */Xcode/DerivedData/*)
       local sibling best newest stamp
@@ -2405,7 +2522,7 @@ cmd_last() {
 delete_item() {
   local how="$1" path="$2" kb name
   case "$how" in
-    simulators|orphan|homebrew|trashapp) ;;
+    simulators|orphan|homebrew|trashapp|path|trash) ;;
     docker) remember_removal "$(docker_kb)" "Docker unused data" ;;
     *)
       if [[ -e "$path" || -L "$path" ]]; then
@@ -2416,7 +2533,21 @@ delete_item() {
       ;;
   esac
   case "$how" in
-    path) remove_one "$(dirname "$path")" "$path" ;;
+    path|trash)
+      if [[ -e "$path" || -L "$path" ]]; then
+        kb="$(kb_of "$path")"
+        name="$(pretty_label "$(basename "$path")" "$path")"
+      fi
+      if [[ "$how" == "trash" ]]; then
+        remove_one "$SWEEP_HOME/.Trash" "$path" || true
+      else
+        remove_one "$(dirname "$path")" "$path" || true
+      fi
+      if [[ "${DID_REMOVE:-0}" -eq 1 ]]; then
+        remember_removal "${kb:-0}" "${name:-item}" "$path"
+      fi
+      [[ "${DID_REMOVE:-0}" -eq 1 ]]
+      ;;
     orphan)
       orphan_still "$path" || die "refusing to touch $path"
       remember_removal "$(kb_of "$path")" "$(pretty_label "$(basename "$path")" "$path")" "$path"
@@ -2424,7 +2555,6 @@ delete_item() {
       ;;
     app) delete_app_cache "$path" ;;
     logs) clean_old_logs_under "$path" ;;
-    trash) remove_one "$SWEEP_HOME/.Trash" "$path" ;;
     backup) delete_backup_child "$path" ;;
     homebrew)
       clean_homebrew
@@ -2490,7 +2620,7 @@ name_matches() {
 }
 
 cmd_clean_only() {
-  local group kb plain label path how base matched sum
+  local group kb plain label path how base matched sum freed_sum
   [[ -n "$PICKS" ]] || die "Name a group. Example: sweep clean caches --only Spotify --yes"
   for group in $PICKS; do
     known_group "$group" || die "unknown group: $group"
@@ -2515,16 +2645,19 @@ cmd_clean_only() {
     printf '  Would remove about %s. Pass --yes to delete it.\n' "$(human "$sum")"
     return 0
   fi
+  freed_sum=0
   for group in $PICKS; do
     while IFS=$'\t' read -r kb plain label path how; do
       [[ -n "$label" ]] || continue
       base="$(basename "$path")"
       if name_matches "$plain" "$plain" "$label" "$base"; then
-        delete_item "$how" "$path"
+        if delete_item "$how" "$path"; then
+          freed_sum=$((freed_sum + kb))
+        fi
       fi
     done < <(sorted_items "$group")
   done
-  printf '  Freed about %s.\n' "$(human "$sum")"
+  printf '  Freed about %s.\n' "$(human "$freed_sum")"
 }
 
 MENU_DIR=""
@@ -2532,6 +2665,7 @@ SCREEN="home"
 GROUP=""
 NOTE=""
 AUTO_MENU=0
+SESSION_FULL=0
 PAGE=1
 FILTER=""
 PAGE_SIZE=12
@@ -2599,24 +2733,30 @@ ensure_catalog() {
   if [[ -f "$MENU_DIR/catalog" && "${CATALOG_PARTIAL:-0}" -eq 1 ]]; then
     : >"$MENU_DIR/catalog.tmp"
     ids="$(installed_ids)"
-    for group in $OPTIONAL_GROUPS; do
+    for group in $LATER_GROUPS; do
       append_group_rows "$group" "$ids"
     done
     sort -nr "$MENU_DIR/catalog" "$MENU_DIR/catalog.tmp" >"$MENU_DIR/catalog.new"
     mv "$MENU_DIR/catalog.new" "$MENU_DIR/catalog"
     rm -f "$MENU_DIR/catalog.tmp"
     CATALOG_PARTIAL=0
+    SESSION_FULL=1
     clear_status
     return 0
   fi
   : >"$MENU_DIR/catalog.tmp"
   ids="$(installed_ids)"
+  if [[ "${SESSION_FULL:-0}" -eq 1 ]]; then
+    list="$FIRST_GROUPS $LATER_GROUPS"
+  else
+    list="$FIRST_GROUPS"
+  fi
   n=0
-  for group in $DEFAULT_GROUPS; do
+  for group in $list; do
     n=$((n + 1))
   done
   i=0
-  for group in $DEFAULT_GROUPS; do
+  for group in $list; do
     i=$((i + 1))
     status "Measuring $i of $n: $group"
     append_group_rows "$group" "$ids"
@@ -2644,7 +2784,11 @@ ensure_catalog() {
   clear_status
   sort -nr "$MENU_DIR/catalog.tmp" >"$MENU_DIR/catalog"
   rm -f "$MENU_DIR/catalog.tmp"
-  CATALOG_PARTIAL=1
+  if [[ "${SESSION_FULL:-0}" -eq 1 ]]; then
+    CATALOG_PARTIAL=0
+  else
+    CATALOG_PARTIAL=1
+  fi
 }
 
 catalog_has_path() {
@@ -2728,6 +2872,47 @@ app_is_open() {
   pgrep -x "$exe" >/dev/null 2>&1
 }
 
+go_would_take() {
+  local group="$1" path="$2" how="$3"
+  [[ "$(care_word "$group")" == "safe" ]] || return 1
+  if [[ "$how" == "trash" && "$(basename "$path")" == *.app ]]; then
+    return 1
+  fi
+  if app_is_open "$path"; then
+    return 1
+  fi
+  return 0
+}
+
+menu_rebuild_items() {
+  local kb plain label path how group
+  : >"$MENU_DIR/items"
+  ITEM_N=0
+  ITEM_HIDDEN=0
+  SAFE_SUM=0
+  TICK_N=0
+  TICK_SUM=0
+  while IFS=$'\t' read -r kb plain label path how group; do
+    [[ -n "$path" ]] || continue
+    if [[ -n "$FILTER" ]] && ! text_has "$plain $label $path" "$FILTER"; then
+      continue
+    fi
+    if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
+      ITEM_HIDDEN=$((ITEM_HIDDEN + 1))
+      continue
+    fi
+    if go_would_take "$group" "$path" "$how"; then
+      SAFE_SUM=$((SAFE_SUM + kb))
+    fi
+    ITEM_N=$((ITEM_N + 1))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ITEM_N" "$kb" "$plain" "$label" "$path" "$how" "$group" >>"$MENU_DIR/items"
+    if path_selected "$path"; then
+      TICK_N=$((TICK_N + 1))
+      TICK_SUM=$((TICK_SUM + kb))
+    fi
+  done <"$MENU_DIR/catalog"
+}
+
 menu_note() {
   if [[ -n "$NOTE" ]]; then
     printf '\n  %s\n' "$NOTE"
@@ -2746,33 +2931,13 @@ menu_draw_home() {
   if [[ -n "$FILTER" ]]; then
     printf '  Showing names that match "%s". Type show for the full list.\n' "$FILTER"
   fi
-  : >"$MENU_DIR/items"
-  n=0
-  ticked=0
-  sum=0
-  total=0
-  hidden=0
-  safe_sum=0
-  while IFS=$'\t' read -r kb plain label path how group; do
-    [[ -n "$path" ]] || continue
-    if [[ -n "$FILTER" ]] && ! text_has "$plain $label $path" "$FILTER"; then
-      continue
-    fi
-    if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
-      hidden=$((hidden + 1))
-      continue
-    fi
-    if [[ "$(care_word "$group")" == "safe" ]]; then
-      safe_sum=$((safe_sum + kb))
-    fi
-    total=$((total + 1))
-    n=$((n + 1))
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$kb" "$plain" "$label" "$path" "$how" "$group" >>"$MENU_DIR/items"
-    if path_selected "$path"; then
-      ticked=$((ticked + 1))
-      sum=$((sum + kb))
-    fi
-  done <"$MENU_DIR/catalog"
+  menu_rebuild_items
+  n="$ITEM_N"
+  ticked="$TICK_N"
+  sum="$TICK_SUM"
+  total="$ITEM_N"
+  hidden="$ITEM_HIDDEN"
+  safe_sum="$SAFE_SUM"
   if [[ "$safe_sum" -gt 0 ]]; then
     printf '  Safe folders here: %s. Type go, then yes.\n' "$(human "$safe_sum")"
   fi
@@ -2849,6 +3014,7 @@ EOF
     cat <<EOF
 
   go       remove safe folders, except apps that are still open
+  stays    every line go will leave
   walk     yes or no, one folder at a time
   clean    delete what you ticked, then type yes
   help     more commands
@@ -3033,10 +3199,11 @@ menu_confirm_yes() {
   [[ "$answer" == "yes" ]]
 }
 
-confirm_special() {
-  local plain="$1" path="$2" expect kind typed
+ask_typed_confirm() {
+  local plain="$1" path="$2" expect kind typed ask
   expect=""
   kind=""
+  ask=0
   case "$plain" in
     *"only backup of this device"*)
       expect="$(backup_device_name "$path")"
@@ -3048,14 +3215,27 @@ confirm_special() {
       ;;
   esac
   [[ -n "$expect" ]] || return 0
-  [[ -n "${MENU_DIR:-}" ]] || return 0
+  if [[ -n "${MENU_DIR:-}" || -n "${SWEEP_FORCE_CONFIRM:-}" ]]; then
+    ask=1
+  elif [[ -n "${SWEEP_TEST:-}" ]]; then
+    return 0
+  elif [[ -t 0 ]]; then
+    ask=1
+  fi
+  [[ "$ask" -eq 1 ]] || return 0
   printf '  This is the only copy. Type the %s to confirm:\n  %s\n  > ' "$kind" "$expect"
   IFS= read -r typed || return 1
   typed="${typed//$'\r'/}"
   if [[ "$typed" != "$expect" ]]; then
-    printf '%s\n' "Left in place. The name did not match." >>"$MENU_DIR/refused"
+    if [[ -n "${MENU_DIR:-}" ]]; then
+      printf '%s\n' "Left in place. The name did not match." >>"$MENU_DIR/refused"
+    fi
     return 1
   fi
+}
+
+confirm_special() {
+  ask_typed_confirm "$1" "$2"
 }
 
 menu_clean_selected() {
@@ -3065,6 +3245,7 @@ menu_clean_selected() {
     return 0
   }
   : >"$MENU_DIR/refused"
+  : >"$MENU_DIR/skipped"
   printf '\n  This will delete:\n'
   sum=0
   ticked=0
@@ -3099,9 +3280,10 @@ menu_clean_selected() {
   fi
   printf '  Type yes to delete, or press return to keep it.\n'
   if menu_confirm_yes; then
-    local before
+    local before freed_kb skipped_note
     before="$(disk_free_kb)"
     removed_n=0
+    freed_kb=0
     while IFS=$'\t' read -r n kb plain label path how group <&4; do
       path_selected "$path" || continue
       if ! confirm_special "$plain" "$path"; then
@@ -3109,14 +3291,19 @@ menu_clean_selected() {
       fi
       if delete_item "$how" "$path"; then
         removed_n=$((removed_n + 1))
+        freed_kb=$((freed_kb + kb))
       fi
     done 4<"$MENU_DIR/items"
     : >"$MENU_DIR/selpaths"
     forget_catalog
     if [[ "$removed_n" -gt 0 ]]; then
-      NOTE="Removed about $(human "$sum"). $(human "$before") free before, $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
+      NOTE="Removed about $(human "$freed_kb"). $(human "$before") free before, $(human "$(disk_free_kb)") free now.$(snapshot_clause)"
     else
       NOTE="Nothing was deleted."
+    fi
+    if [[ -s "$MENU_DIR/skipped" ]]; then
+      skipped_note="$(awk 'NR<=4 { printf "%s%s", (NR==1 ? "" : ", "), $0 } END { if (NR>4) printf ", and %d more", NR-4 }' "$MENU_DIR/skipped")"
+      NOTE="$NOTE Left in place: $skipped_note."
     fi
     if [[ -s "$MENU_DIR/refused" ]]; then
       extra="$(awk 'NR==1 { printf "%s", $0; next } { printf " %s", $0 }' "$MENU_DIR/refused")"
@@ -3185,6 +3372,9 @@ menu_stays_names() {
     if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
       continue
     fi
+    if go_would_take "$group" "$path" "$how"; then
+      continue
+    fi
     if [[ "$shown" -ge 4 ]]; then
       extra=$((extra + 1))
       continue
@@ -3198,17 +3388,41 @@ menu_stays_names() {
   printf '%s' "$names"
 }
 
+menu_print_stays() {
+  local kb plain label path how group any
+  any=0
+  printf '\n  Lines go will leave:\n'
+  [[ -f "$MENU_DIR/catalog" ]] || {
+    printf '  none\n'
+    menu_pause
+    return 0
+  }
+  while IFS=$'\t' read -r kb plain label path how group; do
+    [[ "$(fate_word "$group")" == "stays" ]] || continue
+    if [[ "$SHOW_SMALL" -eq 0 && "$kb" -lt "$MIN_KB" ]]; then
+      continue
+    fi
+    if go_would_take "$group" "$path" "$how"; then
+      continue
+    fi
+    any=1
+    printf '  %s\n' "$plain"
+  done <"$MENU_DIR/catalog"
+  [[ "$any" -eq 1 ]] || printf '  none\n'
+  menu_pause
+}
+
 menu_select_safe() {
   local n kb plain label path how group
   OPEN_LEFT=""
   : >"$MENU_DIR/selpaths"
   while IFS=$'\t' read -r n kb plain label path how group; do
     [[ -n "$path" ]] || continue
-    [[ "$(care_word "$group")" == "safe" ]] || continue
     if app_is_open "$path"; then
       OPEN_LEFT="${OPEN_LEFT:+$OPEN_LEFT, }$plain"
       continue
     fi
+    go_would_take "$group" "$path" "$how" || continue
     printf '%s\n' "$path" >>"$MENU_DIR/selpaths"
   done <"$MENU_DIR/items"
 }
@@ -3239,11 +3453,23 @@ why_item() {
   esac
 }
 
+walk_seen() {
+  local path="$1" scope="$2" file
+  file="$MENU_DIR/walked.$scope"
+  [[ -f "$file" ]] || return 1
+  grep -F -x -q -- "$path" "$file"
+}
+
+walk_mark() {
+  printf '%s\n' "$1" >>"$MENU_DIR/walked.$2"
+}
+
 menu_walk() {
   local scope="$1" kb plain label path how group answer freed n capped total
   ensure_catalog
   finish_catalog
   : >"$MENU_DIR/refused"
+  : >"$MENU_DIR/skipped"
   freed=0
   n=0
   capped=0
@@ -3256,6 +3482,9 @@ menu_walk() {
       continue
     fi
     [[ "$kb" -lt "$MIN_KB" ]] && continue
+    if walk_seen "$path" "$scope"; then
+      continue
+    fi
     total=$((total + 1))
   done 4<"$MENU_DIR/catalog"
   while IFS=$'\t' read -r kb plain label path how group <&4; do
@@ -3264,6 +3493,9 @@ menu_walk() {
       continue
     fi
     if [[ "$kb" -lt "$MIN_KB" ]]; then
+      continue
+    fi
+    if walk_seen "$path" "$scope"; then
       continue
     fi
     if [[ "$n" -ge 12 ]]; then
@@ -3298,10 +3530,14 @@ menu_walk() {
       yes)
         if confirm_special "$plain" "$path" && delete_item "$how" "$path"; then
           freed=$((freed + kb))
+          walk_mark "$path" "$scope"
         fi
         ;;
       quit|q|exit)
         break
+        ;;
+      *)
+        walk_mark "$path" "$scope"
         ;;
     esac
   done 4<"$MENU_DIR/catalog"
@@ -3526,6 +3762,11 @@ menu_handle_word() {
       menu_pause
       return 0
       ;;
+    stays)
+      finish_catalog
+      menu_print_stays
+      return 0
+      ;;
     large)
       [[ "$SCREEN" == "home" ]] || return 1
       cmd_large
@@ -3573,6 +3814,7 @@ menu_handle_word() {
         return 0
       fi
       finish_catalog
+      menu_rebuild_items
       local stays_left
       stays_left="$(menu_stays_names)"
       menu_select_safe
@@ -3688,7 +3930,7 @@ cmd_menu() {
     else
       for word in "$@"; do
         case "$word" in
-          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|small|info|last|login|uninstall|orphans)
+          quit|q|exit|help|\?|large|back|home|all|none|clean|groups|more|next|prev|show|safe|find|walk|go|stays|small|info|last|login|uninstall|orphans)
             NOTE="Type $word on its own line."
             ;;
           *)

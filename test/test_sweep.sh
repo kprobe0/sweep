@@ -114,7 +114,7 @@ test -f "$SWEEP_HOME/src/app/package.json" || fail 'package.json was removed'
 
 large="$("$SWEEP" large)"
 printf '%s\n' "$large" | grep -q 'Home' || fail 'large did not report the home folder'
-"$SWEEP" --version | grep -q '0.17.0'
+"$SWEEP" --version | grep -q '0.18.0'
 
 if "$SWEEP" nope >/dev/null 2>&1; then
   fail 'unknown group should fail'
@@ -874,6 +874,168 @@ if [[ -f "$sparse" ]]; then
     esac
   fi
 fi
+
+mkdir -p "$SWEEP_HOME/.Trash/Kept.app"
+dd if=/dev/zero of="$SWEEP_HOME/.Trash/Kept.app/payload" bs=1024 count=8192 >/dev/null 2>&1
+printf 'loose' > "$SWEEP_HOME/.Trash/loose-go.txt"
+go_trash="$(printf 'go\nyes\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+test -d "$SWEEP_HOME/.Trash/Kept.app" || fail 'go deleted an app that was already in the Trash'
+test ! -e "$SWEEP_HOME/.Trash/loose-go.txt" || fail 'go left a loose Trash file'
+left_line="$(printf '%s\n' "$go_trash" | grep 'Left unticked' || true)"
+case "$left_line" in
+  *Kept*) ;;
+  *) fail 'go did not name the trashed app it left' ;;
+esac
+case "$left_line" in
+  *loose-go*) fail 'go said it left a trash file it deleted' ;;
+esac
+measuring_n="$(printf '%s\n' "$go_trash" | grep -c 'still measuring' || true)"
+if [[ "$measuring_n" -ne 1 ]]; then
+  fail "a finished menu said groups were still measuring ($measuring_n)"
+fi
+
+mkdir -p "$SWEEP_HOME/Library/Caches/zz.walked"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/zz.walked/file" bs=1024 count=16384 >/dev/null 2>&1
+walk_out="$(printf 'walk\nno\nquit\nwalk\nquit\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+walk_names="$(printf '%s\n' "$walk_out" | awk '/ of [0-9]/ { print name } { name=prev; prev=$0 }')"
+first_walk="$(printf '%s\n' "$walk_names" | head -n 1)"
+second_walk="$(printf '%s\n' "$walk_names" | sed -n '2p')"
+case "$first_walk" in
+  *zz.walked*) ;;
+  *) fail 'walk did not start at the large cache' ;;
+esac
+case "$second_walk" in
+  *zz.walked*) fail 'walk repeated a folder that was kept' ;;
+esac
+[[ -n "$second_walk" ]] || fail 'the next walk had no folder'
+
+mkdir -p "$SWEEP_HOME/Library/Caches/sizeme"
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/sizeme/file" bs=1024 count=8 >/dev/null 2>&1
+"$SWEEP" items caches >/dev/null
+dd if=/dev/zero of="$SWEEP_HOME/Library/Caches/sizeme/file" bs=1024 count=2048 >/dev/null 2>&1
+size_line="$( "$SWEEP" items caches | grep sizeme || true)"
+case "$size_line" in
+  *'2.0 MB'*) fail 'a saved size was ignored while the folder date was unchanged' ;;
+esac
+touch "$SWEEP_HOME/Library/Caches/sizeme"
+size_line="$( "$SWEEP" items caches | grep sizeme || true)"
+case "$size_line" in
+  *'2.0 MB'*) ;;
+  *) fail 'a changed folder kept its old size' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/Library/Caches/Homebrew"
+printf 'old' > "$SWEEP_HOME/Library/Caches/Homebrew/cccccccc--curl--1.0.tar.gz"
+printf 'new' > "$SWEEP_HOME/Library/Caches/Homebrew/dddddddd--curl--1.2.tar.gz"
+touch -t 201901010000 "$SWEEP_HOME/Library/Caches/Homebrew/cccccccc--curl--1.0.tar.gz"
+touch -t 202001010000 "$SWEEP_HOME/Library/Caches/Homebrew/dddddddd--curl--1.2.tar.gz"
+first_brew="$(printf 'quit\n' | PATH="$bindir:$PATH" "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+case "$first_brew" in
+  *curl--1.0*) fail 'Homebrew was on the first screen' ;;
+esac
+printf 'go\nyes\nquit\n' | PATH="$bindir:$PATH" "$SWEEP" menu >/dev/null
+test ! -e "$SWEEP_HOME/Library/Caches/Homebrew/cccccccc--curl--1.0.tar.gz" || fail 'go skipped a Homebrew download that was not on the first screen'
+test -f "$SWEEP_HOME/Library/Caches/Homebrew/dddddddd--curl--1.2.tar.gz" || fail 'go removed the newest Homebrew download'
+
+mkdir -p "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldZ" "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/NewZ"
+printf 'old' > "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldZ/file"
+printf 'new' > "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/NewZ/file"
+touch -t 201901010000 "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldZ" \
+  "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldZ/file"
+printf 'go\nyes\nquit\n' | "$SWEEP" menu >/dev/null
+test ! -e "$SWEEP_HOME/Library/Developer/Xcode/DerivedData/OldZ" || fail 'go skipped an old Xcode build'
+
+mkdir -p "$SWEEP_HOME/Pictures/Photos Library.photoslibrary/proj/node_modules" \
+  "$SWEEP_HOME/Music/album/node_modules" \
+  "$SWEEP_HOME/src/keptproj/node_modules"
+printf '{}' > "$SWEEP_HOME/src/keptproj/package.json"
+printf '{}' > "$SWEEP_HOME/Pictures/Photos Library.photoslibrary/proj/package.json"
+printf '{}' > "$SWEEP_HOME/Music/album/package.json"
+printf 'n' > "$SWEEP_HOME/src/keptproj/node_modules/n"
+printf 'n' > "$SWEEP_HOME/Pictures/Photos Library.photoslibrary/proj/node_modules/n"
+printf 'n' > "$SWEEP_HOME/Music/album/node_modules/n"
+proj_list="$("$SWEEP" items projects)"
+case "$proj_list" in
+  *keptproj*) ;;
+  *) fail 'a project outside Pictures was hidden' ;;
+esac
+case "$proj_list" in
+  *photoslibrary*|*Music/album*) fail 'the project search walked Pictures or Music' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/Library/Caches/linked.menu"
+printf 'same' > "$SWEEP_HOME/Library/Caches/linked.menu/file"
+ln "$SWEEP_HOME/Library/Caches/linked.menu/file" "$SWEEP_HOME/Library/Caches/linked.menu/file2"
+link_menu="$(printf 'linked.menu\nclean\nyes\nquit\n' | "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+test -f "$SWEEP_HOME/Library/Caches/linked.menu/file" || fail 'the menu removed a shared file'
+case "$link_menu" in
+  *'Left in place'*linked.menu*) ;;
+  *) fail 'the menu counted a skipped file as removed' ;;
+esac
+
+mkdir -p "$SWEEP_HOME/pnpm-store/v3"
+printf 'pkg' > "$SWEEP_HOME/pnpm-store/v3/pkg"
+cat > "$bindir/pnpm" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "store" && "$2" == "path" ]]; then
+  printf '%s\n' "$SWEEP_HOME/pnpm-store/v3"
+  exit 0
+fi
+if [[ "$1" == "store" && "$2" == "prune" ]]; then
+  printf 'prune\n' >> "$SWEEP_HOME/pnpm.called"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$bindir/pnpm"
+pnpm_items="$(PATH="$bindir:$PATH" "$SWEEP" items dev)"
+case "$pnpm_items" in
+  *'pnpm store'*) ;;
+  *) fail 'the pnpm store was not listed' ;;
+esac
+PATH="$bindir:$PATH" "$SWEEP" clean dev >/dev/null
+test -f "$SWEEP_HOME/pnpm-store/v3/pkg" || fail 'a dry run deleted the pnpm store'
+PATH="$bindir:$PATH" "$SWEEP" clean --yes dev >/dev/null
+case "$(cat "$SWEEP_HOME/pnpm.called")" in
+  *prune*) ;;
+  *) fail 'the pnpm store was removed without pnpm store prune' ;;
+esac
+
+rm -rf "$SWEEP_HOME/Library/Application Support/MobileSync/Backup"
+mkdir -p "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone"
+python3 - <<PY
+import datetime, plistlib
+p="$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone/Info.plist"
+plistlib.dump({"Device Name":"OnlyPhone","Last Backup Date":datetime.datetime(2024,5,1)}, open(p,"wb"))
+PY
+printf 'b' > "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone/info"
+printf 'nope\n' | SWEEP_FORCE_CONFIRM=1 "$SWEEP" clean --yes backups >/dev/null
+test -d "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone" || fail 'a wrong device name deleted the only backup'
+printf 'OnlyPhone\n' | SWEEP_FORCE_CONFIRM=1 "$SWEEP" clean --yes backups >/dev/null
+test ! -d "$SWEEP_HOME/Library/Application Support/MobileSync/Backup/only-phone" || fail 'the device name did not confirm the backup'
+
+rm -rf "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport"
+mkdir -p "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)"
+printf 's' > "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)/file"
+printf 'nope\n' | SWEEP_FORCE_CONFIRM=1 "$SWEEP" clean --yes devices >/dev/null
+test -d "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)" || fail 'a wrong version deleted the only device-support folder'
+printf '21E213\n' | SWEEP_FORCE_CONFIRM=1 "$SWEEP" clean --yes devices >/dev/null
+test ! -d "$SWEEP_HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone 17.4 (21E213)" || fail 'the system version did not confirm device support'
+
+i=1
+while [[ "$i" -le 5 ]]; do
+  dd if=/dev/zero of="$SWEEP_HOME/Downloads/stay$i.bin" bs=1024 count=2048 >/dev/null 2>&1
+  i=$((i + 1))
+done
+stay_list="$(printf 'stays\n\nquit\n' | SWEEP_MIN_KB=1024 "$SWEEP" menu | sed $'s/\033\\[[0-9;]*m//g')"
+i=1
+while [[ "$i" -le 5 ]]; do
+  case "$stay_list" in
+    *"stay$i.bin"*) ;;
+    *) fail "stays hid stay$i.bin" ;;
+  esac
+  i=$((i + 1))
+done
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -s bash "$ROOT/sweep" "$ROOT/install.sh"
